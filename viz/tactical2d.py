@@ -362,8 +362,9 @@ class Tactical2D:
         # 引導敘事：分幕橫幅（上中）、旁白字幕（下中）、聚光燈、解說卡
         self.spot = ax.scatter([], [], s=[], facecolors="none",
                                edgecolors=C_PRED, linewidths=2.8, zorder=8)
+        # 橫幅放 HUD(左上3行)下方，避免與 HUD 重疊
         self.banner = ax.text(
-            0.5, 0.97, "", transform=ax.transAxes, ha="center", va="top",
+            0.5, 0.82, "", transform=ax.transAxes, ha="center", va="top",
             color="#fff3c4", fontsize=20, weight="bold", zorder=12,
             bbox=dict(boxstyle="round,pad=0.5", fc="#1a1206", ec=C_LEADER,
                       alpha=0.93))

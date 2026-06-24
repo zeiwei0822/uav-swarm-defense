@@ -34,3 +34,8 @@ snaps/
 # 建置日誌
 *_log.txt
 *.log
+
+# 簡報產物（非專案原始碼）
+*.pptx
+deck_assets/
+_*.js
