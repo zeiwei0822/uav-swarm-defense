@@ -1,0 +1,10 @@
+numpy>=1.24
+matplotlib>=3.7
+scikit-learn>=1.3
+torch>=2.0
+joblib>=1.3
+# Web 控制台（python web/server.py）
+flask>=3.0
+plotly>=5.20
+# 選用：plotly 圖靜態輸出
+kaleido

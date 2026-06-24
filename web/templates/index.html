@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>無人機機群攻防模擬 — Web 控制台</title>
+<script src="/plotly.js"></script>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --fg:#e6edf3; --muted:#8b949e;
+    --accent:#FF6D00; --border:#30363d; --green:#2E7D32; --red:#D32F2F;
+    --leader:#FFB300;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font-family:"Microsoft JhengHei","Segoe UI",sans-serif;height:100vh;
+    display:flex;flex-direction:column;overflow:hidden;}
+  header{background:var(--bg);border-bottom:1px solid var(--border);
+    padding:8px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  header h1{font-size:15px;margin:0 14px 0 0;white-space:nowrap;}
+  .ctrl{display:flex;align-items:center;gap:4px;}
+  .ctrl label{font-size:12px;color:var(--muted);}
+  select,input[type=number]{background:#0d1117;color:var(--fg);
+    border:1px solid var(--border);border-radius:5px;padding:4px 6px;
+    font-size:13px;}
+  input[type=number]{width:62px;}
+  #go{background:var(--accent);color:#fff;border:none;border-radius:6px;
+    padding:7px 18px;font-size:14px;font-weight:bold;cursor:pointer;}
+  #go:hover{background:#ff8f33;}
+  #go:disabled{opacity:.5;cursor:wait;}
+  #badge{margin-left:auto;font-size:12px;font-weight:bold;}
+  main{flex:1;display:flex;min-height:0;}
+  #left{flex:1;display:flex;flex-direction:column;min-width:0;
+    border-right:1px solid var(--border);}
+  #plot{flex:1;min-height:0;}
+  #right{width:430px;display:flex;flex-direction:column;background:var(--panel);}
+  .tabs{display:flex;border-bottom:1px solid var(--border);}
+  .tab{flex:1;text-align:center;padding:9px;cursor:pointer;font-size:13px;
+    color:var(--muted);}
+  .tab.active{color:#fff;background:var(--accent);}
+  .page{display:none;flex:1;overflow:auto;padding:10px;}
+  .page.active{display:block;}
+  .kpis{display:flex;gap:8px;margin-bottom:10px;}
+  .kpi{flex:1;background:#0d1117;border:1px solid var(--border);
+    border-radius:8px;padding:10px 4px;text-align:center;}
+  .kpi b{display:block;font-size:22px;}
+  .kpi span{font-size:11px;color:var(--muted);}
+  #verdict{padding:8px;border-radius:6px;margin-bottom:8px;font-weight:bold;
+    text-align:center;background:#0d1117;}
+  .events{font-family:Consolas,monospace;font-size:12px;line-height:1.7;
+    white-space:pre-wrap;}
+  .ev-leader{color:var(--leader);} .ev-kill{color:var(--red);}
+  .ev-through{color:#56d364;} .ev-info{color:#58a6ff;}
+  .toolbtn{background:#21262d;color:var(--fg);border:1px solid var(--border);
+    border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer;margin:3px;}
+  .toolbtn:hover{border-color:var(--accent);}
+  .toolbtn:disabled{opacity:.4;cursor:not-allowed;}
+  #console{background:#010409;color:#8b949e;font-family:Consolas,monospace;
+    font-size:11px;white-space:pre-wrap;padding:8px;border-radius:6px;
+    height:240px;overflow:auto;margin-top:8px;}
+  #figsel{width:100%;margin-bottom:8px;}
+  #figimg{width:100%;border-radius:6px;}
+  .hint{color:var(--muted);font-size:12px;line-height:1.6;}
+  #spinner{display:none;color:var(--accent);font-size:13px;}
+</style>
+</head>
+<body>
+<header>
+  <h1>🛩️ 機群攻防模擬</h1>
+  <div class="ctrl"><label>陣型</label>
+    <select id="formation">
+      <option value="vee">V字</option><option value="wedge">楔形</option>
+      <option value="column">縱隊</option><option value="grid">方陣</option>
+      <option value="ring">環形</option></select></div>
+  <div class="ctrl"><label>防方</label>
+    <select id="policy"><option value="ai">AI斬首</option>
+      <option value="nearest">最近目標</option>
+      <option value="random">隨機</option></select></div>
+  <div class="ctrl"><label>識別器</label>
+    <select id="identifier"><option value="auto">自動(RF)</option>
+      <option value="rule">規則</option><option value="rf">RandomForest</option>
+      <option value="mlp">MLP</option></select></div>
+  <div class="ctrl"><label>機數</label>
+    <input type="number" id="n" value="21" min="9" max="40"></div>
+  <div class="ctrl"><label>中繼</label>
+    <input type="number" id="relays" value="3" min="1" max="8"></div>
+  <div class="ctrl"><label>種子</label>
+    <input type="number" id="seed" value="901" min="0" max="99999"></div>
+  <button id="go" onclick="runBattle()">▶ 開戰</button>
+  <span id="spinner">模擬中…</span>
+  <span id="badge"></span>
+</header>
+<main>
+  <div id="left">
+    <div id="plot"></div>
+  </div>
+  <div id="right">
+    <div class="tabs">
+      <div class="tab active" onclick="tab(0)">戰報</div>
+      <div class="tab" onclick="tab(1)">分析圖</div>
+      <div class="tab" onclick="tab(2)">工具</div>
+    </div>
+    <!-- 戰報 -->
+    <div class="page active" id="p0">
+      <div class="kpis">
+        <div class="kpi"><b id="k-alive">—</b><span>存活</span></div>
+        <div class="kpi"><b id="k-through">—</b><span>突防</span></div>
+        <div class="kpi"><b id="k-killed">—</b><span>擊落</span></div>
+        <div class="kpi"><b id="k-ammo">—</b><span>彈藥</span></div>
+      </div>
+      <div id="verdict">設定參數後按「開戰」</div>
+      <div class="events" id="events"></div>
+    </div>
+    <!-- 分析圖 -->
+    <div class="page" id="p1">
+      <select id="figsel" onchange="showFig()"></select>
+      <div class="hint" id="fighint">若清單為空，請到「工具」分頁按「產生分析圖」。</div>
+      <img id="figimg" style="display:none">
+    </div>
+    <!-- 工具 -->
+    <div class="page" id="p2">
+      <p class="hint">背景執行長任務（不影響上方模擬）。首次使用先「訓練 AI 模型」
+        產生 models/，再「產生分析圖」得到 figures/。</p>
+      <div>
+        <button class="toolbtn" id="t-train" onclick="task('train')">🧠 訓練 AI 模型</button>
+        <button class="toolbtn" id="t-anal" onclick="task('analyze')">📊 產生分析圖</button>
+        <button class="toolbtn" id="t-exp" onclick="task('export')" disabled>🎬 匯出當前戰役動畫</button>
+      </div>
+      <div style="margin-top:6px;">
+        <label class="hint">訓練場數</label>
+        <input type="number" id="episodes" value="40" min="10" max="120">
+        <button class="toolbtn" id="t-stop" onclick="stopTask()" disabled>■ 中止</button>
+      </div>
+      <div id="console"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let lastRun = null, logTimer = null;
+
+function params(){
+  return {formation:$('formation').value, policy:$('policy').value,
+    identifier:$('identifier').value, n:+$('n').value,
+    relays:+$('relays').value, seed:+$('seed').value};
+}
+function tab(i){
+  [0,1,2].forEach(j=>{
+    $('p'+j).classList.toggle('active', j===i);
+    document.querySelectorAll('.tab')[j].classList.toggle('active', j===i);
+  });
+  if(i===1) loadFigs();
+}
+
+function notify(msg, ok){
+  const v=$('verdict'); v.textContent=msg;
+  v.style.color = ok ? '#56d364' : '#ff7b72';
+}
+async function runBattle(){
+  $('go').disabled=true; $('spinner').style.display='inline';
+  notify('⏳ 模擬中…（約 20~60 秒，視機數與 AI 設定）', true);
+  try{
+    const r = await fetch('/api/run',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(params())});
+    const d = await r.json();
+    if(d.error){ notify('模擬失敗：'+d.error, false); return; }
+    lastRun = params();
+    await drawFig(d.figure);
+    fillReport(d.report, d.events);
+    $('badge').textContent = 'AI：'+d.ai;
+    $('badge').style.color = '#56d364';
+    $('t-exp').disabled = false;
+  }catch(e){ notify('連線錯誤：'+e, false); console.error(e); }
+  finally{ $('go').disabled=false; $('spinner').style.display='none'; }
+}
+
+async function drawFig(fig){
+  const el = document.getElementById('plot');
+  Plotly.purge(el);
+  await Plotly.newPlot(el, {data:fig.data, layout:fig.layout,
+    config:{responsive:true, displaylogo:false}});
+  // 注意：newPlot/react 物件形式對 scatter3d 會默默丟 frames，必須顯式加
+  if(fig.frames && fig.frames.length) await Plotly.addFrames(el, fig.frames);
+}
+
+function fillReport(r, events){
+  $('k-alive').textContent = r.n_alive;
+  $('k-through').textContent = r.n_through;
+  $('k-killed').textContent = r.n_killed;
+  $('k-ammo').textContent = r.ammo_left;
+  const v = $('verdict');
+  if(r.n_through===0){ v.textContent='🛡️ 防方成功攔阻 ｜ '+r.end_reason;
+    v.style.color='#56d364'; }
+  else { v.textContent='💥 攻方突防 '+r.n_through+' 架 ｜ '+r.end_reason;
+    v.style.color='#ff7b72'; }
+  let html='';
+  for(const e of events){
+    let cls='';
+    if(e.msg.includes('領機')||e.msg.includes('遞補')) cls='ev-leader';
+    else if(e.msg.includes('擊落')) cls='ev-kill';
+    else if(e.msg.includes('突防')) cls='ev-through';
+    html += `<span class="${cls}">[${e.t.toFixed(1)}s] ${e.msg}</span>\n`;
+  }
+  $('events').innerHTML = html;
+}
+
+async function loadFigs(){
+  const r = await fetch('/api/figures'); const d = await r.json();
+  const sel = $('figsel'); const cur = sel.value;
+  sel.innerHTML='';
+  if(!d.figures.length){ $('fighint').style.display='block';
+    $('figimg').style.display='none'; return; }
+  for(const f of d.figures){
+    const o=document.createElement('option'); o.value=f;
+    o.textContent=f.replace('.png',''); sel.appendChild(o);
+  }
+  if([...sel.options].some(o=>o.value===cur)) sel.value=cur;
+  showFig();
+}
+function showFig(){
+  const f = $('figsel').value; if(!f) return;
+  $('fighint').style.display='none';
+  const img=$('figimg'); img.src='/api/figure/'+encodeURIComponent(f);
+  img.style.display='block';
+}
+
+async function task(kind){
+  const body = Object.assign({kind, episodes:+$('episodes').value}, params());
+  if(kind==='train' && !confirm(`將以 ${body.episodes} 場模擬重新訓練 `+
+     `LSTM/RF/MLP，視 GPU 約需數分鐘。確定開始？`)) return;
+  const r = await fetch('/api/task',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const d = await r.json();
+  if(!d.started){ $('console').textContent='已有背景任務執行中。'; return; }
+  setTools(false); pollLog();
+}
+function setTools(en){
+  $('t-train').disabled=!en; $('t-anal').disabled=!en;
+  $('t-exp').disabled = !en || !lastRun;
+  $('t-stop').disabled = en;
+}
+async function pollLog(){
+  clearInterval(logTimer);
+  logTimer = setInterval(async ()=>{
+    const r = await fetch('/api/task/log'); const d = await r.json();
+    const c=$('console'); c.textContent=d.log; c.scrollTop=c.scrollHeight;
+    if(!d.running){ clearInterval(logTimer); setTools(true);
+      if($('p1').classList.contains('active')) loadFigs(); }
+  }, 600);
+}
+async function stopTask(){ await fetch('/api/task/stop',{method:'POST'}); }
+
+// 啟動：查模型狀態
+fetch('/api/status').then(r=>r.json()).then(d=>{
+  const b=$('badge');
+  if(d.models_ready){ b.textContent='● AI 模型就緒 (RF+LSTM)';
+    b.style.color='#56d364'; }
+  else { b.textContent='○ 尚未訓練 AI（用基準法）'; b.style.color='#d29922'; }
+});
+window.addEventListener('resize',()=>Plotly.Plots.resize('plot'));
+</script>
+</body>
+</html>

@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>無人機機群攻防 — 傳統 vs AI</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3;
+    --muted:#8b949e; --accent:#FF6D00; --green:#2ea043; --red:#f85149;
+    --blue:#58a6ff;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font-family:"Microsoft JhengHei","PingFang TC","Noto Sans TC",
+      system-ui,sans-serif; line-height:1.7;
+  }
+  .wrap{max-width:760px; margin:0 auto; padding:18px 16px 60px;}
+  h1{font-size:1.5rem; margin:.2em 0 .1em; line-height:1.3;}
+  .sub{color:var(--muted); font-size:.95rem; margin-bottom:18px;}
+  .tag{color:var(--accent); font-weight:700;}
+
+  /* 對比數據 */
+  .hero{
+    display:flex; gap:10px; margin:16px 0;
+  }
+  .stat{
+    flex:1; background:var(--panel); border:1px solid var(--line);
+    border-radius:14px; padding:14px 10px; text-align:center;
+  }
+  .stat .lbl{font-size:.9rem; color:var(--muted);}
+  .stat .num{font-size:2.4rem; font-weight:800; line-height:1.1; margin:4px 0;}
+  .stat .unit{font-size:.85rem; color:var(--muted);}
+  .stat.trad .num{color:var(--red);}
+  .stat.ai .num{color:var(--green);}
+
+  /* 切換鈕 */
+  .toggle{
+    display:flex; background:var(--panel); border:1px solid var(--line);
+    border-radius:12px; padding:5px; margin:6px 0 14px; gap:5px;
+  }
+  .toggle button{
+    flex:1; border:0; border-radius:9px; padding:13px 8px; cursor:pointer;
+    font-size:1.05rem; font-weight:700; color:var(--muted);
+    background:transparent; font-family:inherit; transition:.15s;
+  }
+  .toggle button.on{color:#fff;}
+  .toggle button.on.trad{background:var(--red);}
+  .toggle button.on.ai{background:var(--accent);}
+
+  /* 影片 */
+  .videobox{
+    position:relative; width:100%; aspect-ratio:15/8.5;
+    background:#000; border:1px solid var(--line); border-radius:12px;
+    overflow:hidden;
+  }
+  video{width:100%; height:100%; display:block; background:#000;}
+  .hint{font-size:.85rem; color:var(--muted); text-align:center; margin:8px 0 0;}
+
+  /* 解說卡 */
+  .card{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:15px 16px; margin:14px 0;
+  }
+  .card h2{font-size:1.12rem; margin:0 0 8px;}
+  .card.trad h2{color:var(--red);}
+  .card.ai h2{color:var(--accent);}
+  .card p{margin:.4em 0; font-size:.98rem;}
+  .pts{list-style:none; padding:0; margin:6px 0;}
+  .pts li{padding:7px 0; border-bottom:1px dashed var(--line); font-size:.96rem;}
+  .pts li:last-child{border-bottom:0;}
+  .pts b{color:var(--blue);}
+  .read li b{color:var(--accent);}
+  .foot{color:var(--muted); font-size:.82rem; text-align:center; margin-top:26px;}
+  .big{font-size:1.05rem;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>無人機機群攻防模擬<br><span class="tag">傳統防空 vs AI 防空</span></h1>
+  <div class="sub">台灣海峽防衛戰 · 環形陣 · 同一場景、同一隨機種子，只差「防方是不是用 AI」。</div>
+
+  <div class="hero">
+    <div class="stat trad">
+      <div class="lbl">傳統防空</div>
+      <div class="num">13</div>
+      <div class="unit">架突破防線</div>
+    </div>
+    <div class="stat ai">
+      <div class="lbl">AI 防空</div>
+      <div class="num">0</div>
+      <div class="unit">架突破防線</div>
+    </div>
+  </div>
+
+  <div class="toggle">
+    <button id="btnTrad" class="trad" onclick="pick('trad')">▶ 傳統防空</button>
+    <button id="btnAi" class="ai on" onclick="pick('ai')">▶ AI 防空</button>
+  </div>
+
+  <div class="videobox">
+    <video id="vid" src="ai.mp4" controls playsinline muted preload="metadata"></video>
+  </div>
+  <div class="hint">點上方切換 · 手機可旋轉橫放看更清楚</div>
+
+  <div id="explain"></div>
+
+  <div class="card">
+    <h2>🎯 這在演什麼？</h2>
+    <p>對岸 21 架無人機以「<b>環形陣</b>」跨海峽進襲——領機藏在隊形<b>正中央</b>、被外圈層層保護。
+       防方只有 <b>18 枚</b>攔截彈，打不完全部，<b>關鍵在「打誰」</b>。</p>
+  </div>
+
+  <div class="card">
+    <h2>本專題四個要點</h2>
+    <ul class="pts">
+      <li><b>①</b> 機群陣形與飛行路徑分析</li>
+      <li><b>②</b> 領機／中繼機失效 → 遞補重組</li>
+      <li><b>③</b> AI（LSTM）軌跡預測</li>
+      <li><b>④</b> AI 從飛行行為找出領機／中繼機</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>畫面怎麼看</h2>
+    <ul class="pts read">
+      <li><b>協調係數 C</b>：領機被擊殺時會崩落 → 機群失去協調</li>
+      <li><b>識別信心</b>：AI 才認得出藏在中央的領機（傳統認不出）</li>
+      <li><b>兵力消長 / 突防數</b>：最終戰果——誰穿透了防線</li>
+    </ul>
+  </div>
+
+  <div class="foot">
+    無人機機群攻防專題 · 2D 戰術推演 · 點按鈕切換傳統 / AI 觀看對比
+  </div>
+
+</div>
+
+<script>
+  const DATA = {
+    trad: {
+      src: "trad.mp4",
+      title: "傳統防空：打不到藏起來的指揮核心",
+      body: "傳統防空永遠先打<b>最近</b>的敵機，並用最陽春的規則猜領機（假設最前面那架是領機）。" +
+            "但環形陣的領機<b>藏在正中央</b>，規則認不出來——於是飛彈全打在外圍從機上，" +
+            "<b>真正的領機毫髮無傷、帶著機群一路突防</b>。結果：<b>13 架穿透防線</b>。"
+    },
+    ai: {
+      src: "ai.mp4",
+      title: "AI 防空：揪出領機、斬首、癱瘓整群",
+      body: "AI 用 <b>RandomForest</b> 從飛行行為（誰居中轉發訊號、誰先轉彎）認出藏在中央的領機，" +
+            "把有限的飛彈<b>優先砸向指揮節點</b>，再用 <b>LSTM</b> 預測攔截點。領機與繼任者接連被斬首、" +
+            "<b>無備援節點可遞補 → 機群迷失癱瘓</b>在離目標近 1 公里處。結果：<b>0 架穿透</b>。"
+    }
+  };
+  const vid = document.getElementById('vid');
+  const explain = document.getElementById('explain');
+  function pick(mode){
+    const d = DATA[mode];
+    vid.src = d.src;
+    vid.play().catch(()=>{});
+    document.getElementById('btnTrad').classList.toggle('on', mode==='trad');
+    document.getElementById('btnAi').classList.toggle('on', mode==='ai');
+    explain.innerHTML =
+      '<div class="card '+mode+'"><h2>'+(mode==='ai'?'🤖 ':'🛡️ ')+d.title+
+      '</h2><p class="big">'+d.body+'</p></div>';
+  }
+  pick('ai');
+</script>
+</body>
+</html>

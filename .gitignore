@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# 訓練中間資料（大、可由 train.py 重生，不需上版）
+data/
+
+# 分析圖（可由 analyze.py 重生）
+figures/
+
+# 暫存/開發用腳本與輸出
+_*.py
+_*.log
+_*.txt
+_*.png
+*.tmp
+snaps/
+
+# 影片：只保留網站(docs/)用的，其餘(根目錄展示影片)不上版
+*.mp4
+!docs/*.mp4
+
+# 編輯器 / 本機設定
+.claude/
+.vscode/
+.idea/
+.DS_Store
+
+# 建置日誌
+*_log.txt
+*.log
