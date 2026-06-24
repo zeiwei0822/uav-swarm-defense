@@ -18,6 +18,7 @@ _*.py
 _*.log
 _*.txt
 _*.png
+_*/
 *.tmp
 snaps/
 

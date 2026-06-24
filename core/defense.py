@@ -150,8 +150,9 @@ class Defense:
 
     # ------------------------------------------------------------ 火控
     def _in_range_targets(self, swarm):
-        # ★陣形隱蔽性：縱隊/楔形被咬得晚（接戰距離縮短→暴露時間短）
-        engage_R = self.cfg.engage_range * getattr(swarm, "stealth", 1.0)
+        # ★陣形隱蔽性 + 電子干擾：低 RCS / 電戰壓制 → 防空被咬得晚、接戰距離縮短
+        engage_R = self.cfg.engage_range * getattr(swarm, "stealth", 1.0) \
+            * getattr(swarm, "ew", 1.0)
         out = []
         for d in swarm.drones:
             if d.alive and self.radar.visible[d.id] and \

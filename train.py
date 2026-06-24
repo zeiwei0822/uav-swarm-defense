@@ -16,8 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import Config, ROLE_LEADER
 from ai import datagen
 from ai.trajectory import train_lstm, kalman_predict_batch, ade_fde, LSTMPredictor
-from ai.identify import (train_rf, train_mlp, RuleIdentifier, RFIdentifier,
-                         MLPIdentifier)
+from ai.identify import (train_rf, train_gbm, train_mlp, RuleIdentifier,
+                         RFIdentifier, GBMIdentifier, MLPIdentifier)
 
 
 def leader_top1(scores, y, grp):
@@ -56,6 +56,7 @@ def evaluate(cfg, verbose=True):
     Xi, yi, gi = d["X"], d["y"], d["grp"]
     models = [RuleIdentifier(),
               RFIdentifier(cfg.ai.rf_path, cfg.ai.scaler_path),
+              GBMIdentifier(cfg.ai.gbm_path, cfg.ai.scaler_path),
               MLPIdentifier(cfg.ai.mlp_path, cfg.ai.scaler_path)]
     print(f"  角色識別（n={len(Xi)} 樣本 / {len(np.unique(gi))} 視窗）")
     for m in models:
@@ -86,6 +87,7 @@ def main():
         d = np.load("data/ident_train.npz")
         print(f"  角色識別器（{len(d['X'])} 樣本）")
         train_rf(d["X"], d["y"], cfg.ai.rf_path, cfg.ai.scaler_path)
+        train_gbm(d["X"], d["y"], cfg.ai.gbm_path, cfg.ai.scaler_path)
         train_mlp(d["X"], d["y"], cfg.ai.mlp_path, cfg.ai.scaler_path)
     print("[3/3] 評估…")
     evaluate(cfg)

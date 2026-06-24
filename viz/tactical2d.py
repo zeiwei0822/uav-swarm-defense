@@ -22,7 +22,8 @@ from config import ROLE_FOLLOWER, ROLE_RELAY, ROLE_LEADER
 from viz import set_chinese_font
 from viz.models3d import _TAIWAN
 from core.formations import (formation_doc, formation_traits,
-                             FORMATION_NAMES)
+                             FORMATION_NAMES, is_fiber, PARADIGM_NAMES,
+                             PARADIGM)
 
 BG = "#0a0e14"
 PANEL = "#10161f"
@@ -132,6 +133,7 @@ class Tactical2D:
 
         is_ai = getattr(self.cfg.defense, "mode", None) == "ai" \
             or self.cfg.defense.policy == "ai"
+        fiber = is_fiber(self.cfg.swarm.formation)   # 光纖群：抗斬首流派
         multi = int(getattr(self.cfg.swarm, "n_axes", 1)) > 1
         axes_note = "　機群分三路、向心夾擊推進（多軸戰術）。" if multi else ""
         beats.append(dict(k=0,
@@ -170,7 +172,15 @@ class Tactical2D:
                                   "機群蛇行閃避　〔領機=威脅預警大腦〕"))
         ld = evk("領機", "擊落")
         lost = evk("迷失")
-        if ld:
+        seam = evk("無縫接替")          # 光纖：領機亡→即時接替
+        if ld and fiber:
+            # 光纖群：領機被打掉，後機沿既有航跡無縫續突 → 斬首失效
+            beats.append(dict(k=ld[1], title="領機被擊殺 · 但鏈路不斷",
+                              focus="leader",
+                              cap="領機被狙殺，但光纖群早把航線存進每架機──"
+                                  "後機沿既有航跡無縫續突，協調係數 C 幾乎不掉"
+                                  "　〔要點4的極限：斬首對光纖群失效〕"))
+        elif ld:
             cap_kill = ("領機被精準狙殺──看右側『協調係數 C』即將崩落、"
                         "『全網預警』翻紅　〔要點4→要點2〕" if is_ai else
                         "領機剛好被擊落（傳統只追打最近、並非刻意鎖定它）──看"
@@ -213,10 +223,16 @@ class Tactical2D:
         na = int(rec.alive[-1].sum())
         ns = int(rec.succeeded[-1].sum())
         verdict = "機群癱瘓，防守成功" if ns == 0 else f"攻方突防 {ns} 架"
-        cap_end = (f"{verdict}。鎖定並擊殺指揮節點，是唯一能癱瘓整個機群的"
-                   f"策略〔總結：要點1-4〕" if is_ai else
-                   f"{verdict}。傳統只追打最近、認不出指揮核心：殺得到外圍、"
-                   f"卻打不斷指揮鏈——這正是 AI 斬首的價值〔對照組〕")
+        if fiber:
+            cap_end = (f"{verdict}。光纖群把航線存進每架機、又免疫電子干擾──"
+                       f"領機被打掉後機照樣突防，AI 斬首在此失效〔要點4 的極限："
+                       f"去單點化反制流派〕" if is_ai else
+                       f"{verdict}。光纖精準群少量、抗干擾、抗斬首〔攻方反制流派〕")
+        else:
+            cap_end = (f"{verdict}。鎖定並擊殺指揮節點，是唯一能癱瘓整個機群的"
+                       f"策略〔總結：要點1-4〕" if is_ai else
+                       f"{verdict}。傳統只追打最近、認不出指揮核心：殺得到外圍、"
+                       f"卻打不斷指揮鏈——這正是 AI 斬首的價值〔對照組〕")
         beats.append(dict(k=T - 1, title="結局", focus="none", cap=cap_end))
         beats.sort(key=lambda b: b["k"])
         # 去除過近重複
@@ -678,8 +694,7 @@ class Tactical2D:
         tli = tl[0] if len(tl) else -1
         ok = "（命中）" if bl == tli and tli >= 0 else \
              ("（誤判）" if bl >= 0 else "")
-        fn = {"vee": "V字", "wedge": "楔形", "column": "縱隊", "grid": "方陣",
-              "ring": "環形"}.get(self.cfg.swarm.formation,
+        fn = FORMATION_NAMES.get(self.cfg.swarm.formation,
                                  self.cfg.swarm.formation)
         pn = {"ai": "指揮節點打擊", "nearest": "最近目標",
               "random": "隨機"}.get(self.cfg.defense.policy,

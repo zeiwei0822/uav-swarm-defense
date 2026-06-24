@@ -31,7 +31,10 @@ from PIL import Image, ImageTk  # Pillow 已隨 matplotlib 安裝
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import Config
-from core.formations import formation_traits
+from core.formations import (formation_traits, FORMATION_NAMES, FORMATION_DOC,
+                             PARADIGM, PARADIGM_NAMES, FORMATION_NDEFAULT,
+                             FORMATION_RELAYS, is_fiber, formation_ew,
+                             FORMATIONS as FORM_KEYS)
 from core.engine import Simulation
 from viz import set_chinese_font
 from viz.tactical2d import Tactical2D
@@ -46,28 +49,16 @@ GREEN = "#2E7D32"
 RED = "#D32F2F"
 CJK = "Microsoft JhengHei"   # 微軟正黑體：避免 CJK 字掉到新細明體
 
-FORMATIONS = [("vee", "V字"), ("wedge", "楔形"), ("column", "縱隊"),
-              ("grid", "方陣"), ("ring", "環形")]
+# 陣型清單（依真實作戰準則，分兩流派；單一資料來源 core/formations.py）
+PARA_TAG = {"wireless": "無線", "fiber": "光纖"}
+FORMATIONS = [(k, f"〔{PARA_TAG[PARADIGM[k]]}〕{FORMATION_NAMES[k]}")
+              for k in FORM_KEYS]
 # 防方＝傳統 / AI 兩種模式（整合了原本的「火力策略」與「識別器」）
 DEFENSE_MODES = [("trad", "傳統防空"), ("ai", "AI防空")]
 
-# ---- 開戰前「作戰簡報」文案（依選項即時切換）----
-FORM_NICK = {"vee": "V字陣（雁行）", "wedge": "楔形陣", "column": "縱隊",
-             "grid": "方陣", "ring": "環形陣（護衛）"}
-
-BRIEF_FORM = {
-    "vee": "「雁行陣」兩翼向後掠開、借前機尾流省油增程，領機在頂端領航、"
-           "前方視野最佳。\n取捨：領機就暴露在最前緣，是最容易被防方優先"
-           "擊殺的節點——想保護領機，改用環形陣。",
-    "wedge": "實心三角把兵力集中、突穿同一個點，正面投影小、不易被清點識別，"
-             "機間通訊緊密、協調性強。\n取捨：領機在三角尖端，仍然偏暴露。",
-    "column": "單列魚貫前進，正面雷達截面最小、最隱蔽，適合貼著海面低空滲透。\n"
-              "取捨：指揮鏈被拉成一條線、通訊最脆弱，而且打頭陣的領機暴露。",
-    "grid": "均勻散開的方陣，通訊冗餘高、四面預警均衡，還能稀釋防空火力"
-            "（一枚飛彈炸不到幾架）。\n領機在前排正中央，是中庸而穩健的隊形。",
-    "ring": "環形護衛——領機被外圈僚機層層包在正中間（正好反制「指揮節點打擊」），"
-            "各機互為掩護。\n取捨：隊形攤得大、暴露面廣、通訊吃緊、轉向也較慢。",
-}
+# ---- 開戰前「作戰簡報」文案（依選項即時切換；陣型解說取自 formations.py）----
+FORM_NICK = {k: FORMATION_NAMES[k] for k in FORM_KEYS}
+BRIEF_FORM = {k: FORMATION_DOC[k] for k in FORM_KEYS}
 
 # 防方兩模式：標題、配色、整合解說（火力＋認領機＋軌跡預測一次講完）
 DEF_TITLE = {"trad": "傳統防空", "ai": "AI 防空"}
@@ -75,17 +66,21 @@ DEF_COLOR = {"trad": "#8b949e", "ai": ACCENT}
 BRIEF_DEFENSE = {
     "trad": "打最近　｜　規則認領機　｜　卡爾曼預測\n"
             "經典點防禦：永遠先打離防線最近的敵機，反應快、命中高。但只用最"
-            "陽春的規則認領機（最前面那架當領機），遇到環形陣就認錯——殺得到"
-            "外圍從機，卻打不到藏在隊形裡的指揮核心，機群照樣協調突防。",
-    "ai": "指揮節點打擊　｜　RandomForest　｜　LSTM 預測\n"
-          "全套 AI：先用 RandomForest 從 9 維行為特徵認出領機／中繼機（準確率"
-          "約 81%），把有限的飛彈優先砸向指揮節點，再用 LSTM 預測攔截點。三個"
-          "AI 要點（預測＋識別＋斬首）全用上，是唯一能打斷指揮鏈、癱瘓整群的打法。",
+            "陽春的規則認領機（最前面那架當領機），遇到把領機藏起來的隊形就"
+            "認錯——殺得到外圍從機，卻打不到指揮核心，機群照樣協調突防。",
+    "ai": "指揮節點打擊　｜　行為識別（樹模型）　｜　LSTM 預測\n"
+          "全套 AI：用樹模型集成從 9 維行為特徵認出領機／中繼機，把有限飛彈"
+          "優先砸向指揮節點，再用 LSTM 預測攔截點。對『有指揮鏈』的無線大群，"
+          "這是唯一能斬首癱瘓整群的打法——但遇到光纖精準群就會踢到鐵板。",
 }
-BRIEF_COMPARE = (
-    "把上方『防方』在傳統／AI 之間切換，用同一陣形、同一種子各跑一次，比較右側"
-    "『協調係數 C』『兵力消長』和『突防數』。\n核心問題：AI 能不能靠認出領機、"
-    "打斷指揮鏈，做到傳統防空做不到的『癱瘓整群』。")
+BRIEF_COMPARE_WIRELESS = (
+    "無線大群有明確指揮鏈。把上方『防方』在傳統／AI 間切換、同陣同種子各跑一次，"
+    "比右側『協調係數 C』與『突防數』。\n核心問題：AI 能否認出領機、打斷指揮鏈，"
+    "做到傳統做不到的『斬首癱瘓整群』。")
+BRIEF_COMPARE_FIBER = (
+    "光纖精準群免疫電子干擾，且『領機被打掉、後機照航跡續突』。\n核心問題：AI 的"
+    "斬首戰術在這裡會不會失效？切到 AI 看它能不能阻止突防——這正是行為識別(要點4)"
+    "遇到去單點化、抗干擾流派的極限。")
 
 
 class App:
@@ -180,12 +175,12 @@ class App:
         bar = ttk.Frame(self.root, style="Bg.TFrame")
         bar.pack(side="top", fill="x", padx=10, pady=8)
 
-        self.var_form = tk.StringVar(value="ring")   # 環形最能展示要點4(規則找不到中央領機)
-        self.var_n = tk.IntVar(value=21)
-        self.var_relay = tk.IntVar(value=3)
+        self.var_form = tk.StringVar(value="arrowhead")  # 無線群尖端領機，最能展示AI斬首
+        self.var_n = tk.IntVar(value=FORMATION_NDEFAULT["arrowhead"])
+        self.var_relay = tk.IntVar(value=FORMATION_RELAYS["arrowhead"])
         self.var_decoy = tk.IntVar(value=0)          # 誘餌數（攻方反制AI識別，0=關）
         self.var_def = tk.StringVar(value="ai")      # 防方：trad / ai
-        self.var_seed = tk.IntVar(value=17)          # 對比乾淨：傳統13突防 vs AI斬首→0突防
+        self.var_seed = tk.IntVar(value=17)
 
         def combo(parent, label, var, options, width=10, on_change=None):
             ttk.Label(parent, text=label, style="Hdr.TLabel").pack(side="left",
@@ -204,14 +199,14 @@ class App:
             cb.bind("<<ComboboxSelected>>", on_sel)
             return cb
 
-        combo(bar, "陣型", self.var_form, FORMATIONS, 8,
-              on_change=self._on_param_change)
+        combo(bar, "陣型", self.var_form, FORMATIONS, 16,
+              on_change=self._on_form_change)
         combo(bar, "防方", self.var_def, DEFENSE_MODES, 11,
               on_change=self._on_param_change)
 
         ttk.Label(bar, text="機數", style="Hdr.TLabel").pack(side="left",
                                                             padx=(8, 3))
-        tk.Spinbox(bar, from_=9, to=40, textvariable=self.var_n, width=4,
+        tk.Spinbox(bar, from_=4, to=40, textvariable=self.var_n, width=4,
                    bg="#0d1117", fg=FG, buttonbackground=PANEL,
                    insertbackground=FG, font=(CJK,15)).pack(side="left")
         ttk.Label(bar, text="中繼", style="Hdr.TLabel").pack(side="left",
@@ -346,17 +341,28 @@ class App:
         fc = self.var_form.get()
         s, c, _ = formation_traits(fc)
         sw = "高" if s <= 0.85 else ("低" if s >= 1.1 else "中")
-        cw = "高" if c >= 1.1 else ("低" if c <= 0.9 else "中")
-        self._brief_card("①　攻方陣形", FORM_NICK.get(fc, fc), "#58a6ff",
+        para = PARADIGM_NAMES[PARADIGM[fc]]
+        if is_fiber(fc):
+            extra = "免疫電戰 · 抗斬首"
+        else:
+            ewp = int(round((1 - formation_ew(fc)) * 100))
+            extra = (f"電戰壓制防空 −{ewp}%" if ewp > 0 else "無電戰") + " · 可斬首"
+        self._brief_card("①　攻方陣形",
+                         f"{para}／{FORM_NICK.get(fc, fc)}", "#58a6ff",
                          BRIEF_FORM.get(fc, ""),
-                         stat=f"隱蔽性 {sw}　·　通訊韌性 {cw}")
+                         stat=f"隱蔽性 {sw}　·　{extra}")
 
         dm = self.var_def.get()
         self._brief_card("②　防方", DEF_TITLE.get(dm, dm),
                          DEF_COLOR.get(dm, ACCENT), BRIEF_DEFENSE.get(dm, ""),
                          stat=("← 對照組" if dm == "trad" else "全套 AI →"))
 
-        self._brief_card("③　這場在比什麼", "傳統 vs AI", GREEN, BRIEF_COMPARE)
+        if is_fiber(fc):
+            self._brief_card("③　這場在比什麼", "AI 斬首會失效嗎", GREEN,
+                             BRIEF_COMPARE_FIBER)
+        else:
+            self._brief_card("③　這場在比什麼", "AI 能否斬首癱瘓", GREEN,
+                             BRIEF_COMPARE_WIRELESS)
 
         nd = int(self.var_decoy.get())
         if nd > 0:
@@ -395,6 +401,14 @@ class App:
         for lbl in getattr(self, "_brief_bodies", []):
             lbl.configure(wraplength=wl)
 
+    def _on_form_change(self):
+        """換陣型 → 依流派自動帶入合理機數/中繼數（無線大群 vs 光纖少量），
+        再走一般的參數變更流程更新簡報。"""
+        fc = self.var_form.get()
+        self.var_n.set(FORMATION_NDEFAULT.get(fc, 21))
+        self.var_relay.set(FORMATION_RELAYS.get(fc, 2))
+        self._on_param_change()
+
     def _on_param_change(self):
         """改了陣形/策略/識別器 → 即時更新簡報；若已跑過戰役則收起動畫回到簡報。"""
         if getattr(self, "_sim_running", False):
@@ -416,6 +430,7 @@ class App:
         傳統＝打最近＋規則認領機＋卡爾曼；AI＝指揮節點打擊＋RF＋LSTM。"""
         if self.var_def.get() == "trad":
             return "nearest", "rule", False
+        # RF＝線上實測最佳（GBM 離線 Top-1 略高，但時序穩定度差→線上斬首反而失效）
         return "ai", "rf", True
 
     # ---- 分頁1：戰報
@@ -533,10 +548,14 @@ class App:
         if getattr(self, "_sim_running", False):
             return
         cfg = Config()
-        cfg.swarm.formation = self.var_form.get()
+        fc = self.var_form.get()
+        cfg.swarm.formation = fc
         cfg.swarm.n_drones = int(self.var_n.get())
         cfg.swarm.n_relays = int(self.var_relay.get())
         cfg.swarm.n_decoys = int(self.var_decoy.get())   # 誘餌（攻方反制AI識別）
+        cfg.swarm.n_axes = 3 if fc == "encircle" else 1  # 包圍：多方位向心
+        # 攔截彈數隨威脅規模調整（小型光纖突擊面對的攔截彈較少，較貼近真實）
+        cfg.defense.n_missiles = max(6, int(round(cfg.swarm.n_drones * 0.7)))
         policy, ident_code, use_lstm = self._defense_spec()
         cfg.defense.policy = policy
         cfg.defense.mode = self.var_def.get()        # 供 tactical2d 切換旁白用

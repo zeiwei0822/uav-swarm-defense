@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import Config
 from core.engine import Simulation
+from core.formations import FORMATIONS
 
 
 def load_ai(cfg, prefer="auto", quiet=False):
@@ -28,8 +29,12 @@ def load_ai(cfg, prefer="auto", quiet=False):
         return identifier, lstm
     if os.path.exists(cfg.ai.rf_path) and os.path.exists(cfg.ai.scaler_path) \
             and prefer in ("auto", "rf"):
-        from ai.identify import RFIdentifier
+        from ai.identify import RFIdentifier          # 線上實測最佳 → 預設主力
         identifier = RFIdentifier(cfg.ai.rf_path, cfg.ai.scaler_path)
+    elif os.path.exists(cfg.ai.gbm_path) and os.path.exists(cfg.ai.scaler_path) \
+            and prefer in ("auto", "gbm"):
+        from ai.identify import GBMIdentifier         # 離線 benchmark 最佳（對照）
+        identifier = GBMIdentifier(cfg.ai.gbm_path, cfg.ai.scaler_path)
     if os.path.exists(cfg.ai.mlp_path) and os.path.exists(cfg.ai.scaler_path) \
             and prefer == "mlp":
         from ai.identify import MLPIdentifier
@@ -48,13 +53,14 @@ def main():
     ap = argparse.ArgumentParser(description="無人機機群攻防模擬")
     ap.add_argument("--policy", default="ai",
                     choices=["ai", "nearest", "random"], help="防方火控策略")
-    ap.add_argument("--formation", default="vee",
-                    choices=["vee", "wedge", "column", "grid", "ring"])
-    ap.add_argument("--n", type=int, default=21, help="機群數量 (15~30)")
+    ap.add_argument("--formation", default="arrowhead", choices=FORMATIONS,
+                    help="無線:echelon/arrowhead/encircle 光纖:snake/vstack/relay_island/fan")
+    ap.add_argument("--n", type=int, default=24, help="機群數量")
     ap.add_argument("--relays", type=int, default=3, help="中繼機數量")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--identifier", default="auto",
-                    choices=["auto", "rule", "rf", "mlp"], help="識別器選擇")
+                    choices=["auto", "rule", "rf", "gbm", "mlp"],
+                    help="識別器選擇（auto=GBM 最佳）")
     ap.add_argument("--no-anim", action="store_true", help="不播動畫")
     ap.add_argument("--no-lstm", action="store_true",
                     help="不用 LSTM，改用卡爾曼基準（傳統防空）")
@@ -70,6 +76,8 @@ def main():
     cfg.swarm.formation = args.formation
     cfg.swarm.n_drones = args.n
     cfg.swarm.n_relays = args.relays
+    cfg.swarm.n_axes = 3 if args.formation == "encircle" else 1
+    cfg.defense.n_missiles = max(6, round(args.n * 0.7))  # 攔截彈隨威脅規模
     cfg.sim.seed = args.seed
 
     identifier, lstm = (None, None) if args.no_defense \

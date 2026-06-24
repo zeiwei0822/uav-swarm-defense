@@ -8,29 +8,35 @@
   :root{
     --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3;
     --muted:#8b949e; --accent:#FF6D00; --green:#2ea043; --red:#f85149;
-    --blue:#58a6ff;
+    --blue:#58a6ff; --cyan:#39d3c3;
   }
   *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
   body{margin:0; background:var(--bg); color:var(--fg);
     font-family:"Microsoft JhengHei","PingFang TC","Noto Sans TC",system-ui,sans-serif;
     line-height:1.7;}
-  .wrap{max-width:780px; margin:0 auto; padding:18px 16px 60px;}
+  .wrap{max-width:800px; margin:0 auto; padding:18px 16px 60px;}
   h1{font-size:1.5rem; margin:.2em 0 .1em; line-height:1.3;}
   .sub{color:var(--muted); font-size:.95rem; margin-bottom:16px;}
   .tag{color:var(--accent); font-weight:700;}
-  .lbl{font-size:.82rem; color:var(--muted); margin:14px 0 6px; font-weight:700;}
+  .lbl{font-size:.82rem; color:var(--muted); margin:16px 0 6px; font-weight:700;}
 
-  /* 陣形選擇器 */
+  /* 流派分組 */
+  .group{margin-bottom:10px;}
+  .gtitle{font-size:.84rem; font-weight:700; margin:8px 0 6px; display:flex;
+    align-items:center; gap:7px;}
+  .gtitle.wl{color:var(--blue);} .gtitle.fb{color:var(--cyan);}
+  .gtitle .dot{font-size:.7rem;}
   .forms{display:flex; flex-wrap:wrap; gap:8px;}
   .forms button{
-    flex:1 1 auto; min-width:88px; border:1px solid var(--line); border-radius:11px;
-    padding:11px 6px; cursor:pointer; font-size:1rem; font-weight:700;
+    flex:1 1 auto; min-width:96px; border:1px solid var(--line); border-radius:11px;
+    padding:11px 6px; cursor:pointer; font-size:.98rem; font-weight:700;
     color:var(--muted); background:var(--panel); font-family:inherit; transition:.15s;}
-  .forms button.on{color:#fff; background:#1f6feb; border-color:#1f6feb;}
+  .forms button.on.wl{color:#fff; background:#1f6feb; border-color:#1f6feb;}
+  .forms button.on.fb{color:#04201d; background:var(--cyan); border-color:var(--cyan);}
 
   /* 傳統/AI 切換 */
   .toggle{display:flex; background:var(--panel); border:1px solid var(--line);
-    border-radius:12px; padding:5px; margin:6px 0 14px; gap:5px;}
+    border-radius:12px; padding:5px; margin:6px 0 12px; gap:5px;}
   .toggle button{flex:1; border:0; border-radius:9px; padding:13px 8px; cursor:pointer;
     font-size:1.05rem; font-weight:700; color:var(--muted); background:transparent;
     font-family:inherit; transition:.15s;}
@@ -38,14 +44,21 @@
   .toggle button.on.ai{background:var(--accent); color:#fff;}
 
   /* 對比數據 */
-  .hero{display:flex; gap:10px; margin:4px 0 14px;}
+  .hero{display:flex; gap:10px; margin:4px 0 10px;}
   .stat{flex:1; background:var(--panel); border:1px solid var(--line);
     border-radius:14px; padding:13px 10px; text-align:center; transition:.15s;}
   .stat .l{font-size:.88rem; color:var(--muted);}
   .stat .n{font-size:2.3rem; font-weight:800; line-height:1.1; margin:3px 0;}
   .stat .u{font-size:.82rem; color:var(--muted);}
   .stat.trad .n{color:var(--red);} .stat.ai .n{color:var(--green);}
+  .stat .s2{font-size:.78rem; margin-top:6px; font-weight:700; line-height:1.35;}
+  .stat.trad .s2{color:#ff9b94;} .stat.ai .s2{color:#7ee2a8;}
   .stat.dim{opacity:.45;}
+
+  .verdict{border-radius:12px; padding:11px 13px; margin:2px 0 12px; font-size:.95rem;
+    font-weight:600; border:1px solid var(--line);}
+  .verdict.wl{background:rgba(46,160,67,.10); border-color:rgba(46,160,67,.5); color:#7ee2a8;}
+  .verdict.fb{background:rgba(248,129,73,.10); border-color:rgba(248,129,73,.5); color:#ffb088;}
 
   .videobox{position:relative; width:100%; aspect-ratio:1500/850;
     background:#000; border:1px solid var(--line); border-radius:12px; overflow:hidden;}
@@ -70,10 +83,17 @@
 <div class="wrap">
 
   <h1>無人機機群攻防模擬<br><span class="tag">傳統防空 vs AI 防空</span></h1>
-  <div class="sub">台灣海峽防衛戰 · 選一種陣形，再切換「傳統／AI」看同一場景的對比。</div>
+  <div class="sub">依真實作戰準則的兩大攻擊流派。選一種陣形、切換「傳統／AI」，看 AI 斬首戰術何時奏效、何時踢到鐵板。</div>
 
   <div class="lbl">① 選擇攻方陣形</div>
-  <div class="forms" id="forms"></div>
+  <div class="group">
+    <div class="gtitle wl"><span class="dot">●</span>無線大群（數十～數百架，有指揮鏈 → 可被斬首）</div>
+    <div class="forms" id="formsWL"></div>
+  </div>
+  <div class="group">
+    <div class="gtitle fb"><span class="dot">●</span>光纖精準群（3–8 架，抗干擾＋抗斬首 → AI 的剋星）</div>
+    <div class="forms" id="formsFB"></div>
+  </div>
 
   <div class="lbl">② 切換防方</div>
   <div class="toggle">
@@ -82,12 +102,13 @@
   </div>
 
   <div class="hero">
-    <div class="stat trad" id="sTrad"><div class="l">傳統防空</div><div class="n" id="nTrad">13</div><div class="u">架突破防線</div></div>
-    <div class="stat ai" id="sAi"><div class="l">AI 防空</div><div class="n" id="nAi">0</div><div class="u">架突破防線</div></div>
+    <div class="stat trad" id="sTrad"><div class="l">傳統防空</div><div class="n" id="nTrad">0</div><div class="u">架突破防線</div><div class="s2" id="s2Trad"></div></div>
+    <div class="stat ai" id="sAi"><div class="l">AI 防空</div><div class="n" id="nAi">0</div><div class="u">架突破防線</div><div class="s2" id="s2Ai"></div></div>
   </div>
+  <div class="verdict" id="verdict"></div>
 
   <div class="videobox">
-    <video id="vid" src="ring_ai.mp4" controls playsinline muted preload="metadata"></video>
+    <video id="vid" src="echelon_ai.mp4" controls playsinline muted preload="metadata"></video>
   </div>
   <div class="hint">點上方切換 · 手機可旋轉橫放看更清楚</div>
   <div class="fdesc" id="fdesc"></div>
@@ -96,16 +117,16 @@
 
   <div class="card">
     <h2>🎯 這在演什麼？</h2>
-    <p>對岸 21 架無人機跨海峽進襲、<b>分三股向心夾擊</b>。防方只有 <b>18 枚</b>攔截彈，打不完全部，<b>關鍵在「打誰」</b>。切換不同陣形，看領機藏在哪、AI 認不認得出來。</p>
+    <p>對岸無人機跨海峽進襲台灣。防方攔截彈<b>不夠打完全部</b>，<b>關鍵在「打誰」</b>。AI 防空想<b>認出領機、斬首指揮鏈</b>癱瘓整群——但攻方有兩種流派：<b>無線大群</b>有明確指揮鏈、會被斬首；<b>光纖精準群</b>把航線存進每架機、又免疫電子干擾，<b>領機被打掉、後機照航跡續突</b>，正是 AI 斬首的剋星。</p>
   </div>
 
   <div class="card">
     <h2>本專題四個要點</h2>
     <ul class="pts">
-      <li><b>①</b> 機群陣形與飛行路徑分析（含多軸夾擊）</li>
-      <li><b>②</b> 領機／中繼機失效 → 遞補重組</li>
-      <li><b>③</b> AI（LSTM）軌跡預測</li>
-      <li><b>④</b> AI 從飛行行為找出領機／中繼機</li>
+      <li><b>①</b> 機群陣形與飛行路徑（兩大攻擊流派、七種陣形）</li>
+      <li><b>②</b> 領機／中繼機失效 → 遞補重組（光纖：無縫接替）</li>
+      <li><b>③</b> AI（LSTM）軌跡預測 → 導引攔截彈</li>
+      <li><b>④</b> AI 從飛行行為找出領機／中繼機 → 斬首（及其極限）</li>
     </ul>
   </div>
 
@@ -113,55 +134,89 @@
     <h2>畫面怎麼看</h2>
     <ul class="pts read">
       <li><b>領機</b>：放大的金色箭頭；<b>誤判</b>：AI 認錯人時 HUD 會標註</li>
+      <li><b>協調係數 C</b>：右側儀表——無線群領機被斬首時崩落、光纖群維持不掉</li>
       <li><b>突防數</b>：最終戰果——誰穿透了防線抵達目標</li>
-      <li>不同陣形領機位置不同：環形藏中央最考驗 AI 識別</li>
     </ul>
   </div>
 
-  <div class="foot">無人機機群攻防專題 · 5 陣形 × 傳統/AI · 點選即看對比</div>
+  <div class="foot">無人機機群攻防專題 · 兩流派 7 陣形 × 傳統/AI · 點選即看對比</div>
 </div>
 
 <script>
   const FORMS = {
-    ring:   { name:"環形陣", trad:13, ai:0, desc:"環形陣：領機藏在正中央、外圈層層保護——規則法認不出，最考驗 AI 識別。" },
-    vee:    { name:"V字陣",  trad:14, ai:0, desc:"V字陣（雁行）：領機在頂端領航、前方視野最佳，但暴露在最前緣。" },
-    wedge:  { name:"楔形陣", trad:12, ai:0, desc:"楔形陣：實心三角集中兵力突穿一點，正面投影小、不易被清點識別。" },
-    column: { name:"縱隊",   trad:9,  ai:0, desc:"縱隊：單列魚貫、正面最隱蔽，但指揮鏈被拉成一條線、最脆弱。" },
-    grid:   { name:"方陣",   trad:9,  ai:0, desc:"方陣：均勻散佈、通訊韌性高，能稀釋防空火力（一枚飛彈炸不到幾架）。" },
+    // 無線大群（有指揮鏈 → 可被斬首）
+    echelon:      { name:"寬幅梯次橫隊", para:"wl", trad:15, ai:10,
+      desc:"前排是可拋棄的誘餌／反輻射機、拉出數公里寬正面壓制雷達；指揮領機藏中排、被護衛包住。傳統只清得掉前排誘餌，AI 靠中心性才揪得出居中指揮。" },
+    arrowhead:    { name:"重疊錐形", para:"wl", trad:9, ai:0,
+      desc:"尖端反輻射機撕開雷達破口、兩翼斜散；真指揮領機藏在本體基點（兩臂交會），正面最難打。傳統打不到、AI 靠中介中心性斬首即潰。" },
+    encircle:     { name:"向心多弧包圍", para:"wl", trad:16, ai:12,
+      desc:"弧臂從多方位向心、用 Time-on-Target 同一秒到達；指揮領機居弧心、被弧臂環抱。傳統打外圍難及弧心，AI 斬中心指揮、但弧群有中繼備援、難全癱。" },
+    // 光纖精準群（抗干擾 + 抗斬首 → AI 失效）
+    snake:        { name:"一字蛇形", para:"fb", trad:5, ai:4,
+      desc:"單列魚貫、僅領機規劃航線，後機複製前機數秒前航跡。光纖免疫干擾；領機被打掉、後機照航跡續突 → AI 斬首失效。" },
+    vstack:       { name:"垂直梯次階梯", para:"fb", trad:2, ai:3,
+      desc:"高度分層(5/30/60m)達成多角度同時打擊、幾無正面縱深。光纖抗風抗干擾，斬首單機不影響其他層。" },
+    relay_island: { name:"母子跳島", para:"fb", trad:5, ai:5,
+      desc:"母機帶光纖前出、降落化為中繼站，子機接力前出、射程加倍。鏈式接力去單點化，難以一斬全斷。" },
+    fan:          { name:"扇形向心", para:"fb", trad:2, ai:3,
+      desc:"各機以 45–90° 固定夾角純直線進襲、互不交叉，逼 CIWS／雷射大角度甩轉。無突出領機又抗斬首 → 對行為識別最棘手。" },
   };
-  const MODES = {
-    trad: { title:"傳統防空：打不到藏起來的指揮核心",
-      body:"永遠先打<b>最近</b>的敵機，用最陽春的規則猜領機。打不到藏在隊形裡的<b>指揮核心</b>——領機帶隊、機群一路突防。" },
-    ai: { title:"AI 防空：揪出領機、斬首、癱瘓整群",
-      body:"用 <b>RandomForest</b> 從飛行行為認出領機，把有限飛彈<b>優先砸向指揮節點</b>，再用 <b>LSTM</b> 預測攔截。領機接連被斬首、<b>無人遞補 → 機群迷失癱瘓</b>。" },
-  };
+  const GROUPS = { wl:["echelon","arrowhead","encircle"], fb:["snake","vstack","relay_island","fan"] };
 
-  let curF = "ring", curM = "ai";
+  function modeText(mode, para){
+    if(mode==='trad') return { title:"傳統防空：打不到藏起來的指揮核心",
+      body:"永遠先打<b>最近</b>的敵機，用最陽春的規則猜領機。打不到藏在隊形裡的<b>指揮核心</b>——領機帶隊、機群一路突防。" };
+    if(para==='wl') return { title:"AI 防空：揪出領機、斬首、癱瘓整群",
+      body:"用 <b>RandomForest</b> 從飛行行為認出領機，把有限飛彈<b>優先砸向指揮節點</b>，再用 <b>LSTM</b> 預測攔截。領機接連被斬、<b>無人遞補 → 機群迷失癱瘓</b>。" };
+    return { title:"AI 防空：想斬首，卻踢到鐵板",
+      body:"AI 一樣認領機、斬首，但<b>光纖群把航線存進每架機、又免疫電子干擾</b>——領機被打掉，<b>後機照既有航跡無縫續突</b>。協調係數 C 幾乎不掉，<b>AI 斬首在此失效</b>。" };
+  }
+  function verdictText(para){
+    if(para==='wl') return { cls:"wl", html:"✅ <b>有指揮鏈</b>：指揮領機藏在中心，傳統「打最近」<b>0% 打得到</b>；AI 靠網路中心性<b>揪出並斬殺（→癱瘓整群）</b>，突防隨之下降。" };
+    return { cls:"fb", html:"⚠️ <b>去單點化＋抗干擾</b>：領機被打掉、後機照航跡續突，<b>AI 斬首失效</b>，突防數和傳統差不多——這正是行為識別（要點4）的極限。" };
+  }
+  function leadStatus(mode, para){
+    if(para==='wl') return mode==='trad' ? '指揮領機 存活（打不到中心）' : '斬殺中心指揮 → 癱瘓';
+    return mode==='trad' ? '小隊突擊' : '斬首無效 · 後機續突';
+  }
+
+  let curF = "arrowhead", curM = "ai";
   const vid = document.getElementById('vid');
   const explain = document.getElementById('explain');
 
-  // 建立陣形按鈕
-  const formsEl = document.getElementById('forms');
-  Object.keys(FORMS).forEach(f => {
-    const b = document.createElement('button');
-    b.textContent = FORMS[f].name; b.id = 'f_' + f;
-    b.onclick = () => pickForm(f);
-    formsEl.appendChild(b);
+  // 建立陣形按鈕（分流派）
+  ['wl','fb'].forEach(g => {
+    const el = document.getElementById(g==='wl'?'formsWL':'formsFB');
+    GROUPS[g].forEach(f => {
+      const b = document.createElement('button');
+      b.textContent = FORMS[f].name; b.id = 'f_' + f; b.dataset.para = g;
+      b.onclick = () => pickForm(f);
+      el.appendChild(b);
+    });
   });
 
   function render(){
-    const F = FORMS[curF], M = MODES[curM];
+    const F = FORMS[curF], M = modeText(curM, F.para), V = verdictText(F.para);
     vid.src = curF + "_" + curM + ".mp4";
     vid.play().catch(()=>{});
     // 按鈕狀態
-    Object.keys(FORMS).forEach(f => document.getElementById('f_'+f).classList.toggle('on', f===curF));
+    Object.keys(FORMS).forEach(f => {
+      const el = document.getElementById('f_'+f);
+      el.classList.toggle('on', f===curF);
+      el.classList.toggle(FORMS[f].para, true);
+    });
     document.getElementById('btnTrad').classList.toggle('on', curM==='trad');
     document.getElementById('btnAi').classList.toggle('on', curM==='ai');
     // 數據
     document.getElementById('nTrad').textContent = F.trad;
     document.getElementById('nAi').textContent = F.ai;
+    document.getElementById('s2Trad').textContent = leadStatus('trad', F.para);
+    document.getElementById('s2Ai').textContent = leadStatus('ai', F.para);
     document.getElementById('sTrad').classList.toggle('dim', curM!=='trad');
     document.getElementById('sAi').classList.toggle('dim', curM!=='ai');
+    // 流派結論
+    const vd = document.getElementById('verdict');
+    vd.className = 'verdict ' + V.cls; vd.innerHTML = V.html;
     // 說明
     document.getElementById('fdesc').textContent = "▸ " + F.desc;
     explain.innerHTML = '<div class="card '+curM+'"><h2>'+(curM==='ai'?'🤖 ':'🛡️ ')+M.title+

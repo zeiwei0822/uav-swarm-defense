@@ -203,6 +203,13 @@ class RFIdentifier:
         return out
 
 
+# ============================================== 2b) 梯度提升樹 GBM（benchmark 最佳）
+class GBMIdentifier(RFIdentifier):
+    """與 RF 同介面（joblib 模型＋scaler＋predict_proba 重排）；
+    benchmark 領機 Top-1 最高（GBM 79% > RF 73%），設為主力識別器。"""
+    name = "GradientBoosting"
+
+
 # ================================================================ 3) MLP（PyTorch）
 def _build_mlp(n_in: int):
     import torch.nn as nn
@@ -258,6 +265,24 @@ def train_rf(X, y, save_path: str, scaler_path: str, verbose=True):
         order = np.argsort(imp)[::-1]
         print("  [RF] 特徵重要度: " +
               ", ".join(f"{FEATURE_NAMES[i]}={imp[i]:.3f}" for i in order))
+    return clf
+
+
+def train_gbm(X, y, save_path: str, scaler_path: str, verbose=True):
+    """梯度提升樹（HistGradientBoosting）——benchmark 領機 Top-1 最佳。"""
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    import joblib
+    mu, sd = X.mean(axis=0), X.std(axis=0) + 1e-9
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    np.savez(scaler_path, mu=mu, sd=sd)
+    Xs = (X - mu) / sd
+    clf = HistGradientBoostingClassifier(
+        class_weight="balanced", max_iter=300, learning_rate=0.1,
+        max_depth=None, random_state=0)
+    clf.fit(Xs, y)
+    joblib.dump(clf, save_path)
+    if verbose:
+        print(f"  [GBM] 訓練完成 train_acc={clf.score(Xs, y):.3f} -> {save_path}")
     return clf
 
 

@@ -13,23 +13,29 @@ from config import Config, ROLE_LEADER
 from core.engine import Simulation
 from ai.trajectory import make_training_windows
 from ai.identify import extract_features
-from core.formations import FORMATIONS
+from core.formations import FORMATIONS, is_fiber
 
 FORM_CODE = {f: i for i, f in enumerate(FORMATIONS)}
 
 
 def random_config(rng) -> Config:
     cfg = Config()
-    cfg.swarm.formation = FORMATIONS[rng.integers(len(FORMATIONS))]
-    cfg.swarm.n_drones = int(rng.integers(15, 31))
-    cfg.swarm.n_relays = int(rng.integers(2, 5))
+    f = FORMATIONS[rng.integers(len(FORMATIONS))]
+    cfg.swarm.formation = f
+    if is_fiber(f):                              # 光纖精準群：3~8 架小隊
+        cfg.swarm.n_drones = int(rng.integers(4, 9))
+        cfg.swarm.n_relays = int(rng.integers(1, 3))
+        cfg.swarm.n_axes = 1
+    else:                                        # 無線大群：20~32 架
+        cfg.swarm.n_drones = int(rng.integers(20, 33))
+        cfg.swarm.n_relays = int(rng.integers(2, 5))
+        cfg.swarm.n_axes = (int(rng.integers(1, 4)) if f == "encircle"
+                            else int(rng.integers(1, 3)))
     cfg.swarm.cruise_speed = float(rng.uniform(15.0, 21.0))
     cfg.swarm.spacing = float(rng.uniform(32.0, 46.0))
     cfg.swarm.spawn_distance = float(rng.uniform(2600.0, 3400.0))
     cfg.swarm.n_waypoints = int(rng.integers(1, 4))
     cfg.swarm.waypoint_lateral = float(rng.uniform(400.0, 900.0))
-    # 多軸夾擊：訓練涵蓋 1~3 股與不同車道寬，讓識別器對單軸/多軸都穩健
-    cfg.swarm.n_axes = int(rng.integers(1, 4))
     cfg.swarm.axis_spread = float(rng.uniform(120.0, 220.0))
     cfg.swarm.fixed_bearing = None   # 訓練資料用隨機方位（多樣化，避免過擬合單一方向）
     cfg.defense.policy = ["nearest", "random"][rng.integers(2)]

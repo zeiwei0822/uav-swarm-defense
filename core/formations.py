@@ -1,31 +1,84 @@
 # -*- coding: utf-8 -*-
 """
-要點 1：機群陣型庫與陣型品質分析
-=================================
-陣型以「領機機體座標系」定義槽位（slot）：
-  +x = 領機航向、+y = 航向左側、z = 高度差
-slots[0] 永遠是領機槽位 (0,0,0)，其餘槽位由 assign_slots() 指派給從機/中繼機。
+要點 1：機群陣型庫（依真實無人機群作戰準則）
+==============================================
+兩大通訊／戰術流派（trade-off 真實化）：
 
-中繼機槽位選擇：將非領機槽位做 k-means 分群，取「最接近各群中心」的槽位
-—— 中繼機天然位於子群中心，最適合轉發領機訊號（也成為防方 AI 可學習的幾何特徵）。
+  🛰️ 無線大群 (wireless)  ── 數十～數百架、靠無線電組網。
+      有明確指揮鏈(C2) → 可被「斬首」癱瘓；常帶電子干擾(EW)壓制防空。
+      ├ echelon      寬幅梯次橫隊：2-3 條平行橫列、飽和正面
+      ├ arrowhead    重疊錐形    ：尖端反輻射機破口、兩翼斜散、失效動態遞補
+      └ encircle     向心多弧包圍：多方位向心、同時到達(ToT)
+
+  🔗 光纖精準群 (fiber)  ── 3～8 架、實體光纖鏈路。
+      免疫電子干擾、且「領機被打掉、後機照航線續突」→ AI 斬首的剋星。
+      ├ snake        一字蛇形    ：單列、後機複製前機數秒前航跡
+      ├ vstack       垂直梯次階梯：高度分層(5/30/60m)→2D 以水平錯位呈現
+      ├ relay_island 母子跳島    ：母機前出變中繼、子機接力、射程加倍
+      └ fan          扇形向心    ：各機固定夾角直線進襲、互不交叉
+
+陣型以「領機機體座標系」定義槽位（slot）：
+  +x = 領機航向、+y = 航向左側、z = 高度差（本 2D 模型多取 0）
+slots[0] 永遠是領機槽位 (0,0,0)。
 """
 import numpy as np
 
-FORMATIONS = ["vee", "wedge", "column", "grid", "ring"]
-FORMATION_NAMES = {"vee": "V字", "wedge": "楔形", "column": "縱隊",
-                   "grid": "方陣", "ring": "環形"}
+# ---------------------------------------------------------------- 陣型清單與分流派
+FORMATIONS = ["echelon", "arrowhead", "encircle",        # 無線大群
+              "snake", "vstack", "relay_island", "fan"]   # 光纖精準群
 
-# 要點1：陣形戰術取捨（都是 trade-off，讓陣形選擇有真實後果）
-#   stealth  : 防方接戰距離倍率（<1 = 被咬得晚/近、暴露時間短；>1 = 早被發現）
-#   comm     : 通訊半徑倍率（>1 = 連線率高→預警/協調強；<1 = 通訊吃緊）
-#   note     : 戰術定位（報告用）
+FORMATION_NAMES = {
+    "echelon": "寬幅梯次橫隊", "arrowhead": "重疊錐形", "encircle": "向心多弧包圍",
+    "snake": "一字蛇形", "vstack": "垂直梯次階梯",
+    "relay_island": "母子跳島", "fan": "扇形向心",
+}
+
+PARADIGM = {
+    "echelon": "wireless", "arrowhead": "wireless", "encircle": "wireless",
+    "snake": "fiber", "vstack": "fiber", "relay_island": "fiber", "fan": "fiber",
+}
+PARADIGM_NAMES = {"wireless": "無線大群", "fiber": "光纖精準群"}
+
+# 各流派的合理規模（app/demo 取用；無線大群、光纖少量）
+FORMATION_NDEFAULT = {
+    "echelon": 22, "arrowhead": 20, "encircle": 24,
+    "snake": 6, "vstack": 5, "relay_island": 7, "fan": 6,
+}
+FORMATION_RELAYS = {           # 預設中繼機數
+    "echelon": 3, "arrowhead": 3, "encircle": 4,
+    "snake": 1, "vstack": 1, "relay_island": 2, "fan": 1,
+}
+
+
+def formation_paradigm(name):
+    return PARADIGM.get(name, "wireless")
+
+
+def is_fiber(name):
+    """光纖精準群：免疫電子干擾、且抗斬首（領機亡、後機照航線續突）。"""
+    return PARADIGM.get(name) == "fiber"
+
+
+# ---------------------------------------------------------------- 戰術取捨
+#   stealth : 防方接戰距離倍率（<1 = 被咬得晚/近、暴露短；>1 = 早被發現）
+#   comm    : 通訊半徑倍率（>1 = 連線率高→預警/協調強；<1 = 通訊吃緊）
+#   ew      : 電子干擾對防空接戰距離的壓制倍率（<1 = 防空更晚才能接戰）
+#   note    : 戰術定位（報告用）
 FORMATION_TRAITS = {
-    # name      stealth  comm   note
-    "vee":     (1.00,   1.05, "增程巡航、左右翼預警均衡"),
-    "wedge":   (0.85,   1.15, "集中突穿、低可偵測、通訊緊密"),
-    "column":  (0.78,   0.85, "正面最隱蔽、單列突防，但指揮鏈拉長"),
-    "grid":    (1.00,   1.10, "均衡方陣、通訊韌性高"),
-    "ring":    (1.20,   0.80, "領機居中藏匿(反斬首)，但footprint大、通訊吃緊"),
+    # name           stealth comm   note
+    "echelon":      (1.05,  0.90, "寬正面飽和、以量取勝；電戰層壓制防空"),
+    "arrowhead":    (0.82,  1.15, "尖端反輻射破口、集中突穿、失效動態遞補"),
+    "encircle":     (1.10,  0.80, "多方位向心、同時到達(ToT)逼防空分身乏術"),
+    "snake":        (0.68,  1.30, "單列最小正面、後機沿前機航跡、抗斬首"),
+    "vstack":       (0.82,  1.30, "多角度同時打擊、無正面縱深、抗干擾"),
+    "relay_island": (0.74,  1.30, "光纖接力跳島、射程加倍、低空隱蔽"),
+    "fan":          (0.98,  1.30, "固定夾角直線進襲、逼防空大角度甩轉"),
+}
+# 電子干擾壓制（僅無線大群帶 EW 載荷；光纖群不帶 EW，但免疫被干擾）
+# 取輕度壓制：足以敘事(−8~12%)，又不至於讓防空太晚接戰而抹平 AI 斬首的價值。
+FORMATION_EW = {
+    "echelon": 0.88, "arrowhead": 0.92, "encircle": 0.92,
+    "snake": 1.0, "vstack": 1.0, "relay_island": 1.0, "fan": 1.0,
 }
 
 
@@ -35,20 +88,35 @@ def formation_traits(name):
     return s, c, note
 
 
-# 陣形戰略說明（要點1）——特別點出「領機位置/暴露」這個核心取捨，
-# 直接回答「為何這樣排、領機在前是不是送頭」
+def formation_ew(name):
+    """電子干擾對防空接戰距離的壓制倍率（<1 = 防空更晚接戰）"""
+    return FORMATION_EW.get(name, 1.0)
+
+
+# ---------------------------------------------------------------- 陣型說明（要點1，作戰簡報用）
 FORMATION_DOC = {
-    "vee": "V字（雁行）：兩翼後掠，可借尾流省油增程；領機在頂端領航、"
-           "前方視野最佳。取捨：領機暴露於最前緣，是最容易被優先擊殺的"
-           "節點──想保護領機就改用環形。",
-    "wedge": "楔形：實心三角集中兵力突穿一點，正面投影小、不易清點識別；"
-             "通訊緊密、協調強。領機在前端，仍偏暴露。",
-    "column": "縱隊：單列魚貫，正面雷達截面最小、最隱蔽，適合低空滲透。"
-              "取捨：指揮鏈被拉成一線、通訊最脆弱，且首機（領機）暴露。",
-    "grid": "方陣：均勻散佈、通訊韌性高，能稀釋防空火力（一枚彈殺不到幾架）；"
-            "領機在前排中央。中庸而穩健。",
-    "ring": "環形護衛：領機居中受外圈層層保護（可反制指揮節點打擊），"
-            "各機互為掩護；取捨：footprint 大、暴露面廣、通訊吃緊、轉向較慢。",
+    "echelon": "寬幅梯次橫隊（無線大群）：前排是可拋棄的誘餌／反輻射機、拉出數公里寬"
+               "正面癱瘓防空判讀並壓制雷達；指揮領機藏在中排、被左右護衛包住。取捨："
+               "傳統打最近只能清掉前排誘餌、傷不到中央指揮——但 AI 靠網路中心性"
+               "仍揪得出居中領機並斬首。",
+    "arrowhead": "重疊錐形（無線大群）：尖端由可拋棄的反輻射機撕開雷達破口、兩翼斜散層層"
+                 "疊進；真正的指揮領機藏在本體基點（兩臂交會處），正面最難打到。取捨："
+                 "傳統打不到藏在後方的指揮核心，AI 靠中介中心性才認得出、斬首即潰。",
+    "encircle": "向心多弧包圍（無線大群）：弧臂從多方位向心壓迫、以 Time-on-Target 讓各股"
+                "「同一秒」到達；指揮領機居弧心、被弧臂環抱保護。取捨：協同極依賴指揮，"
+                "傳統打外圍弧臂、難及弧心，AI 斬中心指揮即打亂 ToT 時序。",
+    "snake": "一字蛇形（光纖精準群）：單列魚貫、20-50m 間距，僅領機規劃航線，後機自駕"
+             "複製「前機數秒前的航跡」。正面雷達截面最小、光纖免疫干擾；關鍵：領機被"
+             "打掉，後機仍沿既有航跡續突──這是 AI 斬首(要點4)的死穴。",
+    "vstack": "垂直梯次階梯（光纖精準群）：以高度分層(5/30/60m，本 2D 以水平錯位呈現)"
+              "達成多角度同時打擊、幾乎無正面縱深。光纖鏈路抗風抗干擾；少量精準、"
+              "斬首單機不影響其他層。",
+    "relay_island": "母子跳島／鏈條（光纖精準群）：母機帶 5-10km 光纖前出、降落屋頂林梢"
+                    "化為中繼站，子機再接力前出，射程加倍。鏈式接力＋光纖 → 抗干擾、"
+                    "去單點化，斬首任一節點難以全斷。",
+    "fan": "扇形向心（光纖精準群）：各機以 45-90° 固定夾角、純直線向目標進襲、互不交叉，"
+           "逼 CIWS／雷射在極短時間內大角度甩轉。無單一行為突出的領機、又抗斬首 → "
+           "對行為式識別最棘手。",
 }
 
 
@@ -63,56 +131,59 @@ def make_formation(name: str, n: int, spacing: float) -> np.ndarray:
     slots = [np.zeros(3)]
     k = n - 1  # 非領機槽位數
 
-    if name == "vee":  # V 字：左右兩翼，後掠 30 度
+    if name == "echelon":          # 寬幅梯次橫隊：前排(+x)可拋棄誘餌、領機居中排被包
+        per = int(np.ceil(k / 3))
+        for i in range(k):
+            r = i // per                       # 0=前排(誘餌) 1=中排(領機列) 2=後排
+            c = i % per
+            x = (1 - min(r, 2)) * s * 1.5       # 前 +1.5s / 中 0 / 後 -1.5s
+            y = (c - (per - 1) / 2) * s * 1.3
+            if r == 1 and abs(y) < s * 0.6:     # 中排空出中央給領機（被左右護衛包住）
+                y += s * 1.3
+            slots.append(np.array([x, y, 0.0]))
+
+    elif name == "arrowhead":      # 重疊錐形：尖端反輻射機在前(+x,可拋棄)、領機在本體基點被包
         for i in range(k):
             side = 1 if i % 2 == 0 else -1
             rank = i // 2 + 1
-            slots.append(np.array([-rank * s * 0.87, side * rank * s * 0.5, 0.0]))
-
-    elif name == "wedge":  # 楔形：實心三角，逐排填滿
-        row, placed = 1, 0
-        while placed < k:
-            m = row + 1  # 此排機數
-            for j in range(m):
-                if placed >= k:
-                    break
-                y = (j - (m - 1) / 2) * s
-                slots.append(np.array([-row * s * 0.9, y, 0.0]))
-                placed += 1
-            row += 1
-
-    elif name == "column":  # 縱隊：n>12 採雙縱隊
-        files = 2 if n > 12 else 1
-        for i in range(k):
-            f = i % files
-            rank = i // files + 1
-            y = (f - (files - 1) / 2) * s * 1.2
-            slots.append(np.array([-rank * s * 0.8, y, 0.0]))
-
-    elif name == "grid":  # 方陣：領機在最前排中央
-        cols = int(np.ceil(np.sqrt(n)))
-        placed = 0
-        idx = 0
-        while placed < k:
-            row = idx // cols
-            col = idx % cols
-            idx += 1
-            if row == 0 and col == cols // 2:   # 此格保留給領機
-                continue
-            x = -row * s
-            y = (col - (cols - 1) / 2) * s
+            x = rank * s * 0.62                 # 朝前(+x)張成箭頭；領機在後基點(兩臂交會=高中心性)
+            y = side * rank * s * 0.5
             slots.append(np.array([x, y, 0.0]))
-            placed += 1
 
-    elif name == "ring":  # 環形護衛：領機在圓心（正面性失效 → 凸顯 ML 價值）
-        n1 = min(k, 10)               # 內圈最多 10 架
-        n2 = k - n1
-        for i in range(n1):
-            th = 2 * np.pi * i / n1
-            slots.append(np.array([np.cos(th), np.sin(th), 0.0]) * s * 1.7)
-        for i in range(n2):
-            th = 2 * np.pi * (i + 0.5) / max(n2, 1)
-            slots.append(np.array([np.cos(th), np.sin(th), 0.0]) * s * 2.9)
+    elif name == "encircle":       # 向心多弧包圍：弧臂在前(+x)環抱、領機居弧心被保護
+        for i in range(k):
+            frac = (i + 1) / (k + 1)
+            ang = (frac - 0.5) * np.deg2rad(200.0)        # 寬達 ±100°
+            R = s * 2.7
+            x = np.cos(ang) * R * 0.5                      # 弧面朝前、領機在弧心後方被環抱
+            y = np.sin(ang) * R
+            slots.append(np.array([x, y, 0.0]))
+
+    elif name == "snake":          # 一字蛇形：單列縱隊
+        for i in range(k):
+            slots.append(np.array([-(i + 1) * s * 1.15, 0.0, 0.0]))
+
+    elif name == "vstack":         # 垂直梯次階梯：高度分層 → 水平階梯錯位
+        for i in range(k):
+            step = i + 1
+            x = -step * s * 0.45                            # 幾乎無正面縱深
+            y = step * s * 0.62                             # 一致對角階梯
+            slots.append(np.array([x, y, 0.0]))
+
+    elif name == "relay_island":   # 母子跳島：拉長的鏈條、微 zigzag
+        for i in range(k):
+            x = -(i + 1) * s * 1.4
+            y = (s * 0.45 if i % 2 else -s * 0.45)
+            slots.append(np.array([x, y, 0.0]))
+
+    elif name == "fan":            # 扇形向心：寬扇面、各自直線進襲
+        for i in range(k):
+            frac = (i + 1) / (k + 1)
+            ang = (frac - 0.5) * np.deg2rad(150.0)         # ±75°
+            R = s * 2.3
+            x = -np.cos(ang) * R * 0.35                     # 在領機後方扇開
+            y = np.sin(ang) * R
+            slots.append(np.array([x, y, 0.0]))
     else:
         raise ValueError(f"未知陣型: {name}")
 
@@ -122,7 +193,10 @@ def make_formation(name: str, n: int, spacing: float) -> np.ndarray:
 def pick_relay_slots(slots: np.ndarray, n_relays: int, rng=None) -> list:
     """k-means 分群挑中繼機槽位（回傳槽位索引，不含 0 號領機槽）"""
     rng = rng or np.random.default_rng(0)
+    n_relays = max(0, int(n_relays))
     pts = slots[1:]                     # 排除領機
+    if n_relays == 0 or len(pts) == 0:
+        return []
     if len(pts) <= n_relays:
         return list(range(1, len(slots)))
     # 簡易 k-means（n 小，10 次迭代足夠；以最遠點初始化避免退化）

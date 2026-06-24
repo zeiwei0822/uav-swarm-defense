@@ -25,14 +25,18 @@ class SimConfig:
 # ---------------------------------------------------------------- 攻方機群
 @dataclass
 class SwarmConfig:
-    n_drones: int = 21         # 機群總數（含領機與中繼機）
+    n_drones: int = 24         # 機群總數（含領機與中繼機）
     n_relays: int = 3          # 中繼機數量
-    formation: str = "vee"     # 初始陣型: vee / wedge / column / grid / ring
+    # 初始陣型（兩流派，見 core/formations.py）：
+    #   無線大群: echelon / arrowhead / encircle
+    #   光纖精準: snake / vstack / relay_island / fan
+    formation: str = "arrowhead"
     spacing: float = 38.0      # 陣型基準間距 (m)
 
     # ★ 多軸夾擊戰術：機群分 n_axes 股縱隊（領機在中央股），出發橫向分開、
-    #   接近目標時逐漸向心收攏夾擊。1=單股(舊行為)。領機仍是唯一總指揮。
-    n_axes: int = 3
+    #   接近目標時逐漸向心收攏夾擊。1=單股。新陣型幾何已自帶展開，預設 1，
+    #   僅 encircle（向心多弧包圍）會調高以呈現多方位向心。
+    n_axes: int = 1
     axis_spread: float = 170.0  # 出發時兩翼股相對中央的橫向偏移 (m，<comm_range 才連得上)
 
     # ★ 誘餌戰術（攻方反制 AI 識別）：n_decoys 架從機衝最前方扮「假領機」，
@@ -125,6 +129,7 @@ class AIConfig:
     model_dir: str = "models"
     lstm_path: str = "models/lstm_traj.pt"
     rf_path: str = "models/rf_identify.joblib"
+    gbm_path: str = "models/gbm_identify.joblib"   # 梯度提升樹（benchmark 最佳，主力）
     mlp_path: str = "models/mlp_identify.pt"
     scaler_path: str = "models/feat_scaler.npz"
 

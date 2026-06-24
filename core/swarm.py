@@ -21,7 +21,8 @@ from config import SwarmConfig, ROLE_FOLLOWER, ROLE_RELAY, ROLE_LEADER, ROLE_NAM
 from core.drone import Drone
 from core.formations import (make_formation, pick_relay_slots,
                              slot_world_positions, rotation_xy,
-                             formation_traits)
+                             formation_traits, is_fiber, formation_ew,
+                             formation_paradigm)
 
 
 def _greedy_assign(drone_pos: np.ndarray, slot_pos: np.ndarray) -> list:
@@ -57,6 +58,12 @@ class Swarm:
         # ★ 陣形戰術取捨 + 領機角色機制狀態
         self.stealth, self.comm_mult, self.form_note = \
             formation_traits(cfg.formation)
+        # ★ 兩大流派：光纖群免疫電子干擾且抗斬首；無線群帶電戰壓制但有指揮鏈
+        self.fiber = is_fiber(cfg.formation)
+        self.ew = formation_ew(cfg.formation)     # 電戰對防空接戰距離壓制(<1)
+        self.paradigm = formation_paradigm(cfg.formation)
+        self.fiber_lag = 24      # 蛇形尾隨：後機落後前機幾步(×rank)複製航跡
+        self.leader_trail = []   # 領機航跡緩衝（一字蛇形沿跡尾隨用）
         self.coord_C = 1.0        # 協調係數（領機在→高，死→驟降，遞補→緩升）
         self.coord_ready_t = 0.0  # 協調重建完成時刻
         self.warn_active = True   # 全網預警是否生效（領機在線）
@@ -136,6 +143,12 @@ class Swarm:
         # 初始指派 = 各機就位於自己的槽
         self.assignment = {i: i for i in range(n)}
 
+        # ★ 光纖群：每架都經實體光纖持有完整航線 → 全員任務備援，
+        #   領機被打掉可「即時無縫接替」，後機照航跡續突（抗斬首的關鍵）。
+        if self.fiber:
+            for d in self.drones:
+                d.has_mission = True
+
         # ★ 誘餌＋沉默領機：首要誘餌頂到隊形最顯眼處(slot0)當「空間領頭」、
         #   負責導航讓全隊繞它編隊；真領機與它對調、退到邊緣槽位「藏身」，
         #   但仍是通訊/協調的真指揮。AI 只能從飛行行為認領機→把誘餌當領機打→
@@ -213,6 +226,19 @@ class Swarm:
             for d in alive:
                 d.connected = False
             return connected
+        # ★ 光纖群：實體光纖鏈路，不受距離/電子干擾影響 → 全員恆連線。
+        if self.fiber:
+            for d in alive:
+                d.connected = connected[d.id] = True
+                d.last_heard = t
+                d.last_leader_pos = leader.pos.copy()
+                d.last_leader_vel = leader.vel.copy()
+                d.last_form_heading = self.form_heading.copy()
+                if d.role == ROLE_RELAY and not d.has_mission:
+                    d.has_mission = True
+            self.comm_edges = [(leader.id, d.id) for d in alive
+                               if d.id != leader.id]
+            return connected
         # 通訊半徑套用陣形 comm_mult（密集陣通訊強、散開陣吃緊）
         comm_R = self.cfg.comm_range * self.comm_mult
         # BFS：中繼機在任一已連線廣播節點範圍內 → 加入廣播樹
@@ -273,15 +299,24 @@ class Swarm:
         # --- A. 領機失效：心跳逾時 → 選舉
         leader = self.get_leader()
         if leader is None and not self.lost_mode:
-            if self.leader_death_t is not None and self.election_done_t is None:
-                detect_t = self.leader_death_t + cfg.heartbeat_timeout
-                if t >= detect_t:
-                    self.election_done_t = detect_t + cfg.election_delay
-                    self.events.append((t, "⚠️ 機群偵測到領機失聯，啟動選舉"))
-            if self.election_done_t is not None and t >= self.election_done_t:
-                self._elect_leader(t)
-                self.election_done_t = None
-                self.leader_death_t = None
+            if self.fiber:
+                # 光纖：實體鏈路斷線「即時」被偵測，無縫接替、無選舉延遲
+                if self.leader_death_t is not None:
+                    self._elect_leader(t)
+                    self.election_done_t = None
+                    self.leader_death_t = None
+            else:
+                if self.leader_death_t is not None \
+                        and self.election_done_t is None:
+                    detect_t = self.leader_death_t + cfg.heartbeat_timeout
+                    if t >= detect_t:
+                        self.election_done_t = detect_t + cfg.election_delay
+                        self.events.append((t, "⚠️ 機群偵測到領機失聯，啟動選舉"))
+                if self.election_done_t is not None \
+                        and t >= self.election_done_t:
+                    self._elect_leader(t)
+                    self.election_done_t = None
+                    self.leader_death_t = None
 
         # --- B. 非領機損失確認 → 重組
         due = [x for x in self.pending_confirm if x[0] <= t]
@@ -313,10 +348,16 @@ class Swarm:
         old_role = new.role
         new.role = ROLE_LEADER
         self.leader_id = new.id
-        self.coord_ready_t = t + self.cfg.coord_rebuild_time  # 協調須重建
-        self.events.append(
-            (t, f"👑 {ROLE_NAMES[old_role]} #{new.id} 遞補為新領機"
-                f"（協調重建中…）"))
+        if self.fiber:
+            # 光纖：航線早經實體鏈路共享 → 無縫接替，協調不需重建
+            self.coord_ready_t = t
+            self.events.append(
+                (t, f"🔗 光纖無縫接替：#{new.id} 即時續飛航線（後機照常突防）"))
+        else:
+            self.coord_ready_t = t + self.cfg.coord_rebuild_time  # 協調須重建
+            self.events.append(
+                (t, f"👑 {ROLE_NAMES[old_role]} #{new.id} 遞補為新領機"
+                    f"（協調重建中…）"))
         # 領機從原中繼機升任 → 中繼機數量不足 → 提拔從機
         self._promote_relay(t, near_id=new.id)
         self._regen_formation(t, reason="新領機重整編隊")
@@ -337,8 +378,10 @@ class Swarm:
                 pool.sort(key=lambda d: np.linalg.norm(d.pos - ref))
             chosen = pool[0]
             chosen.role = ROLE_RELAY
-            # 任務資料須耗時同步（_update_comm 於同步完成後賦予備援資格）
-            chosen.mission_sync_t = t + self.cfg.mission_sync_time
+            # 任務資料須耗時同步（_update_comm 於同步完成後賦予備援資格）；
+            # 光纖群經實體鏈路即時取得航線 → 無同步延遲。
+            chosen.mission_sync_t = t + (0.0 if self.fiber
+                                         else self.cfg.mission_sync_time)
             self.events.append(
                 (t, f"🔁 從機 #{chosen.id} 提拔為中繼機（任務同步中…）"))
 
@@ -405,6 +448,19 @@ class Swarm:
             slot[1] += self.drone_lane.get(d.id, 0.0) * self._cf
             target = Lp + rotation_xy(h) @ slot
             a = cfg.kp * (target - d.pos) + cfg.kd * (Lv - d.vel)
+            return a + self._evade_accel(d, t, missiles)
+        # ★ 一字蛇形：後機沿「領機數秒前的航跡」尾隨 → 真正的蛇行軌跡；
+        #   領機亡→新領機續寫航跡、後機照跟（抗斬首的具體呈現）。
+        if self.formation == "snake" and len(self.leader_trail) > 2:
+            rank = max(1, self.assignment.get(d.id, 1))
+            idx = max(0, len(self.leader_trail) - 1 - rank * self.fiber_lag)
+            tgt = self.leader_trail[idx].copy()
+            tgt[2] = cfg.spawn_alt
+            idx2 = min(len(self.leader_trail) - 1, idx + 1)
+            tang = self.leader_trail[idx2] - self.leader_trail[idx]
+            nt = np.linalg.norm(tang)
+            vdes = tang / nt * cfg.cruise_speed if nt > 1e-6 else d.vel
+            a = cfg.kp * 1.5 * (tgt - d.pos) + cfg.kd * (vdes - d.vel)
             return a + self._evade_accel(d, t, missiles)
         # 自身認知的領機狀態：連線 → 即時；斷線 → 航位推算 (dead-reckoning)
         if not d.connected and d.last_leader_pos is not None:
@@ -529,7 +585,9 @@ class Swarm:
             self.coord_C = 0.0
             return
         conn = float(np.mean([d.connected for d in alive]))
-        if leader is None:
+        if self.fiber:
+            target = max(conn, 0.7)            # 光纖：協調靠預規劃航線，不依賴領機
+        elif leader is None:
             target = 0.15                      # 無領機 → 協調崩潰
         elif t < self.coord_ready_t:           # 遞補後協調重建中 → 緩升
             span = self.cfg.coord_rebuild_time
@@ -550,6 +608,10 @@ class Swarm:
         leader = self.get_leader()
         self._leader_ok = leader is not None    # 供 _evade_accel 判斷預警
         self._cf = self._converge_frac(leader)  # 多軸向心收攏係數（1→0）
+        if leader is not None:                  # 一字蛇形：緩存領機航跡供後機沿跡尾隨
+            self.leader_trail.append(leader.pos.copy())
+            if len(self.leader_trail) > 600:
+                self.leader_trail.pop(0)
         anchor = self._anchor_drone(leader)     # 空間領頭(領機或誘餌)
         self._anchor_live = anchor.id if anchor is not None else self.leader_id
         sep = self._separation_accel()
