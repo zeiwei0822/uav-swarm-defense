@@ -91,6 +91,11 @@ class Defense:
         self.pred_paths = {}                  # target_id -> (H,3) 最新預測軌跡
         self.shots_fired = 0
         self.kills = 0
+        # ★ SIGINT 解碼進度（0~1）：在雷達範圍累積，領機(流量大)解碼最快，滿才能鎖定
+        self.decode = np.zeros(n_drones)
+        # ★ SEAD 壓制：反輻射機進近距→火力被壓制(撕開破口)，期間無法發射
+        self.suppress_until = -1e9
+        self.suppressed = False
 
     # ------------------------------------------------------------ 識別（要點4）
     def _run_identification(self, t, swarm):
@@ -112,6 +117,25 @@ class Defense:
         lead_p = self.ident_probs[:, ROLE_LEADER].copy()
         self.believed_leader = int(np.argmax(lead_p)) if lead_p.max() > 0 else -1
         self.leader_conf = float(lead_p.max())
+
+    # ------------------------------------------------------------ SIGINT 射頻確認（要點4·獨立感測）
+    def _update_decode(self, swarm):
+        """SIGINT/ESM 射頻確認 —— ★與 GNN『看怎麼飛』完全獨立的第二感測器★。
+        目標進接戰 envelope 後開始截獲其 C2 射頻；decode 是『SIGINT 確認這是指揮鏈
+        節點的信心』，會朝該機的真實發射量 c2_emission『上限』累積、發射越強累積越快：
+          領機 emission=1.0→爬到 1.0；中繼 0.5→只到 0.5；從機/誘餌 0.1→只到 0.1。
+        ★關鍵★：這是上限封頂、不是延遲——從機/誘餌的 decode 永遠到不了確認門檻
+        (decode_confirm)，所以『飛得像領機卻不發真 C2 的誘餌』再久也不會被 SIGINT
+        確認、不會被斬首。雷達看得到形體、SIGINT 未確認者(<門檻)顯示灰色。"""
+        engage_R = self.cfg.engage_range * getattr(swarm, "stealth", 1.0) \
+            * getattr(swarm, "ew", 1.0)
+        rate = self.dt / max(self.cfg.decode_full_t, 1e-3)
+        for d in swarm.drones:
+            if d.alive and self.radar.visible[d.id] \
+                    and np.linalg.norm(d.pos - self.site) <= engage_R:
+                cap = float(getattr(d, "c2_emission", 0.1))   # 確認上限=真實發射量
+                if self.decode[d.id] < cap:
+                    self.decode[d.id] = min(cap, self.decode[d.id] + rate * cap)
 
     # ------------------------------------------------------------ 軌跡預測（要點3）
     def predict_path(self, target_id) -> np.ndarray:
@@ -167,37 +191,61 @@ class Defense:
                 c[m.target_id] = c.get(m.target_id, 0) + 1
         return c
 
-    def _select_target(self, t, swarm):
-        cand = self._in_range_targets(swarm)
+    def _select_target(self, t, swarm, mass_only=False):
+        cand = self._in_range_targets(swarm)        # 接戰圈內、可被雷達追蹤者
         if not cand:
             return None, ""
         engaged = self._engaged_counts()
-        free = [i for i in cand if engaged.get(i, 0) == 0]
-        pool = free if free else cand
-        pol = self.cfg.policy
 
+        def nearest(pool_ids, why):
+            free = [i for i in pool_ids if engaged.get(i, 0) == 0]
+            p = free if free else pool_ids
+            dists = [np.linalg.norm(swarm.drones[i].pos - self.site) for i in p]
+            return p[int(np.argmin(dists))], why
+
+        pol = self.cfg.policy
+        # ★ 分層火力：mass_only 的發射器專責攔截『最逼近目標的一般機』(防飽和突防)，
+        #   不追指揮鏈——和斬首發射器分工，AI 才不會把彈都倒在指揮鏈、放任人海突防。
+        #   AI 模式下 mass 發射器同樣受 SIGINT 篩選：不確認的從機/誘餌不開火，
+        #   傳統則直接打最近——誘餌場景的核心差異點（傳統浪費彈在誘餌，AI 不吃誘餌）。
+        if mass_only and pol == "ai":
+            gate = self.cfg.decode_enable
+            confirmed = [i for i in cand
+                         if (not gate) or self.decode[i] >= self.cfg.decode_confirm]
+            if confirmed:
+                return nearest(confirmed, "攔截最逼近(SIGINT確認)·防飽和")
+            return None, ""   # 尚無 SIGINT 確認目標，暫緩（不浪費彈在誘餌/從機）
+        if mass_only or pol == "nearest":
+            return nearest(cand, "攔截最逼近·防飽和" if mass_only else "最近目標")
         if pol == "ai":
-            # 指揮鏈打擊：領機與中繼機（任務備援/繼任者）以連續評分一起排序，
-            # 殺掉領機後立即轉打最可能的繼任節點，不等重新識別
-            chain = self.ident_probs[:, ROLE_LEADER] \
-                + 0.9 * self.ident_probs[:, ROLE_RELAY]
-            mask = np.zeros(self.n, bool)
-            mask[pool] = True
-            chain[~mask] = -1
-            best = int(np.argmax(chain))
-            if chain[best] >= self.cfg.ident_conf_fire * 0.5:
-                pl = self.ident_probs[best, ROLE_LEADER]
-                pr = self.ident_probs[best, ROLE_RELAY]
-                kind = "領機" if pl >= pr else "中繼機"
-                return best, f"AI指揮鏈打擊:{kind}(L={pl:.2f},R={pr:.2f})"
-            # 識別不明 → 最近目標
-            dists = [np.linalg.norm(swarm.drones[i].pos - self.site) for i in pool]
-            return pool[int(np.argmin(dists))], "最近目標"
+            # ★ 感測融合斬首：GNN(看運動)決定「該打誰」、SIGINT(看 C2 射頻)確認「能不能打」。
+            #   只有 SIGINT 已確認(decode>=1)的目標才允許斬首→領機射頻最強、最先被確認先斬；
+            #   誘餌飛得像領機卻不發真 C2→永遠卡在未確認、AI 不被它牽走。攔截彈仍可打任何被
+            #   追蹤的一般機(不需 SIGINT 確認)→AI 不空等、邊清外圍邊等領機被確認。
+            gate = self.cfg.decode_enable
+            decoded = [i for i in cand
+                       if (not gate) or self.decode[i] >= self.cfg.decode_confirm]
+            free_d = [i for i in decoded if engaged.get(i, 0) == 0]
+            pool_d = free_d if free_d else decoded
+            if pool_d:
+                chain = self.ident_probs[:, ROLE_LEADER] \
+                    + 0.9 * self.ident_probs[:, ROLE_RELAY]
+                mask = np.zeros(self.n, bool)
+                mask[pool_d] = True
+                chain[~mask] = -1
+                best = int(np.argmax(chain))
+                if chain[best] >= self.cfg.ident_conf_fire * 0.5:
+                    pl = self.ident_probs[best, ROLE_LEADER]
+                    pr = self.ident_probs[best, ROLE_RELAY]
+                    kind = "領機" if pl >= pr else "中繼機"
+                    return best, f"AI指揮鏈打擊:{kind}(L={pl:.2f},R={pr:.2f})"
+            # 領機尚未鎖定(解碼中) → 先攻最近的一般目標(不需解碼)
+            return nearest(cand, "最近目標(領機鎖定中)")
         elif pol == "nearest":
-            dists = [np.linalg.norm(swarm.drones[i].pos - self.site) for i in pool]
-            return pool[int(np.argmin(dists))], "最近目標"
+            return nearest(cand, "最近目標")
         else:  # random
-            return int(self.rng.choice(pool)), "隨機目標"
+            free = [i for i in cand if engaged.get(i, 0) == 0]
+            return int(self.rng.choice(free if free else cand)), "隨機目標"
 
     def _launch(self, t, target_id, why):
         d0 = self.site + np.array([0, 0, 3.0])
@@ -258,16 +306,33 @@ class Defense:
     def step(self, t, swarm):
         self._step = int(round(t / self.dt))
         self.radar.update(swarm, self.cfg.radar_range)
+        if self.cfg.decode_enable:
+            self._update_decode(swarm)        # SIGINT 解碼進度（領機先現身）
 
         if self.identifier is not None and t >= self.next_ident_t:
             self._run_identification(t, swarm)
             self.next_ident_t = t + self.cfg.ident_interval
 
-        # 發射決策
+        # ★ SEAD 壓制：任一反輻射機進 sead_range → 防空火力遭壓制(撕開雷達破口)，
+        #   壓制窗口內無法發射，主力鑽過缺口突防。
+        sr = getattr(self.cfg, "sead_range", 0.0)
+        if sr > 0:
+            for d in swarm.drones:
+                if d.alive and getattr(d, "is_sead", False) and \
+                        np.linalg.norm(d.pos - self.site) <= sr:
+                    self.suppress_until = max(
+                        self.suppress_until, t + self.cfg.sead_suppress_t)
+                    break
+        self.suppressed = t < self.suppress_until
+
+        # 發射決策 ── ★分層火力：多座發射器時，奇數座專責攔截最逼近的一般機(防飽和
+        #   突防)、其餘座專責指揮鏈斬首；單座則全力斬首。避免 AI 把彈全倒在指揮鏈、
+        #   放任人海突防（SIGINT 封頂後從機不可斬，這層攔截才補得回防守）。
         for li in range(self.cfg.n_launchers):
-            if self.ammo <= 0 or t < self.launch_ready[li]:
+            if self.suppressed or self.ammo <= 0 or t < self.launch_ready[li]:
                 continue
-            target, why = self._select_target(t, swarm)
+            mass = (self.cfg.n_launchers > 1 and li % 2 == 1)
+            target, why = self._select_target(t, swarm, mass_only=mass)
             if target is None:
                 continue
             self._launch(t, target, why)

@@ -32,14 +32,18 @@ class Recorder:
         self.conn_ratio = []   # 連線比例
         self.coord_C = []      # ★協調係數（領機角色機制）
         self.warn_active = []  # ★全網預警是否生效
+        self.decode = []       # ★SIGINT 解碼進度 (N,) 0~1（要點4：先看形體後解析）
+        self.suppressed = []   # ★防空火力是否遭 SEAD 壓制（撕開破口的可見化）
         self.wp = None         # 任務航線
         self.events = []       # (t, 文字)
 
     def snap(self, t, swarm: Swarm, defense):
         self.t.append(t)
-        # 誘餌遮罩（靜態，記一次即可；供視覺化標示與「AI誤判誘餌」旁白）
+        # 誘餌／反輻射遮罩（靜態，記一次即可；供視覺化標示）
         self.is_decoy = np.array([getattr(d, "is_decoy", False)
                                   for d in swarm.drones])
+        self.is_sead = np.array([getattr(d, "is_sead", False)
+                                 for d in swarm.drones])
         self.pos.append(swarm.positions().copy())
         self.alive.append(swarm.alive_mask().copy())
         self.succeeded.append(np.array([d.succeeded for d in swarm.drones]))
@@ -82,12 +86,16 @@ class Recorder:
                                   for m in defense.missiles])
             self.pred_paths.append({k: v.copy()
                                     for k, v in defense.pred_paths.items()})
+            self.decode.append(defense.decode.copy())
+            self.suppressed.append(bool(getattr(defense, "suppressed", False)))
         else:
             self.ident_probs.append(np.zeros((self.n, 3)))
             self.believed_leader.append(-1)
             self.leader_conf.append(0.0)
             self.missiles.append([])
             self.pred_paths.append({})
+            self.decode.append(np.ones(self.n))     # 無防方→視為全可見
+            self.suppressed.append(False)
 
     def finalize(self):
         self.t = np.array(self.t)
@@ -104,6 +112,8 @@ class Recorder:
         self.conn_ratio = np.array(self.conn_ratio)
         self.coord_C = np.array(self.coord_C)
         self.warn_active = np.array(self.warn_active)
+        self.decode = np.array(self.decode)
+        self.suppressed = np.array(self.suppressed)
         return self
 
 

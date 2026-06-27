@@ -156,6 +156,195 @@ class LSTMPredictor:
         return pred[0] if single else pred
 
 
+# ================================================================ MLP（AI 法 baseline）
+class TrajMLP(nn.Module):
+    """扁平化 MLP：把過去位移序列拉直 → 一次輸出未來 horizon 步位移"""
+
+    def __init__(self, hist_len: int, horizon: int, hidden: int = 256):
+        super().__init__()
+        self.horizon = horizon
+        self.hist_len = hist_len
+        self.net = nn.Sequential(
+            nn.Linear((hist_len - 1) * 3, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, horizon * 3),
+        )
+
+    def forward(self, x):       # x: (B, T-1, 3)
+        B = x.shape[0]
+        return self.net(x.reshape(B, -1)).view(B, self.horizon, 3)
+
+
+class MLPTrajPredictor:
+    """推論包裝：吃絕對位置歷史 → 輸出絕對位置預測（前處理與 LSTM 相同）"""
+
+    def __init__(self, model_path: str, dt: float, max_speed: float = 25.0):
+        self.dt = dt
+        self.scale = max_speed * dt
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
+        ckpt = torch.load(model_path, map_location=device, weights_only=True)
+        self.horizon  = ckpt["horizon"]
+        self.hist_len = ckpt["hist_len"]
+        self.model = TrajMLP(self.hist_len, self.horizon, ckpt["hidden"])
+        self.model.load_state_dict(ckpt["state_dict"])
+        self.model.to(device).eval()
+
+    def predict(self, pos_hist: np.ndarray) -> np.ndarray:
+        single = pos_hist.ndim == 2
+        if single:
+            pos_hist = pos_hist[None]
+        deltas = np.diff(pos_hist, axis=1)
+        R = LSTMPredictor._heading_rot(deltas)
+        d_body = deltas.copy()
+        d_body[..., :2] = np.einsum("bij,btj->bti", R, deltas[..., :2])
+        x = torch.tensor(d_body / self.scale, dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            y = self.model(x).cpu().numpy() * self.scale
+        y_world = y.copy()
+        Rinv = np.transpose(R, (0, 2, 1))
+        y_world[..., :2] = np.einsum("bij,bhj->bhi", Rinv, y[..., :2])
+        pred = pos_hist[:, -1:, :] + np.cumsum(y_world, axis=1)
+        return pred[0] if single else pred
+
+
+# ================================================================ Transformer（AI 法）
+class TrajTransformer(nn.Module):
+    """Transformer 編碼器：對時間步做自注意力 → 輸出未來 horizon 步位移"""
+
+    def __init__(self, horizon: int, d_model: int = 64, nhead: int = 4,
+                 num_layers: int = 2):
+        super().__init__()
+        self.horizon = horizon
+        self.input_proj = nn.Linear(3, d_model)
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead,
+            dim_feedforward=256, batch_first=True, dropout=0.1)
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+        self.head = nn.Sequential(
+            nn.Linear(d_model, 128), nn.ReLU(),
+            nn.Linear(128, horizon * 3),
+        )
+
+    def forward(self, x):       # x: (B, T-1, 3)
+        h = self.encoder(self.input_proj(x))
+        return self.head(h[:, -1, :]).view(-1, self.horizon, 3)
+
+
+class TransformerPredictor:
+    """推論包裝（前處理與 LSTM 相同，方便公平比較）"""
+
+    def __init__(self, model_path: str, dt: float, max_speed: float = 25.0):
+        self.dt = dt
+        self.scale = max_speed * dt
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
+        ckpt = torch.load(model_path, map_location=device, weights_only=True)
+        self.horizon = ckpt["horizon"]
+        self.model = TrajTransformer(
+            ckpt["horizon"], ckpt["d_model"], ckpt["nhead"], ckpt["num_layers"])
+        self.model.load_state_dict(ckpt["state_dict"])
+        self.model.to(device).eval()
+
+    def predict(self, pos_hist: np.ndarray) -> np.ndarray:
+        single = pos_hist.ndim == 2
+        if single:
+            pos_hist = pos_hist[None]
+        deltas = np.diff(pos_hist, axis=1)
+        R = LSTMPredictor._heading_rot(deltas)
+        d_body = deltas.copy()
+        d_body[..., :2] = np.einsum("bij,btj->bti", R, deltas[..., :2])
+        x = torch.tensor(d_body / self.scale, dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            y = self.model(x).cpu().numpy() * self.scale
+        y_world = y.copy()
+        Rinv = np.transpose(R, (0, 2, 1))
+        y_world[..., :2] = np.einsum("bij,bhj->bhi", Rinv, y[..., :2])
+        pred = pos_hist[:, -1:, :] + np.cumsum(y_world, axis=1)
+        return pred[0] if single else pred
+
+
+# ================================================================ 通用訓練核心（MLP / Transformer 共用）
+def _train_traj_model(model: nn.Module, X: np.ndarray, Y: np.ndarray,
+                      scale: float, epochs: int = 12, batch: int = 512,
+                      lr: float = 1e-3, val_split: float = 0.1,
+                      label: str = "model", verbose: bool = True):
+    """前處理（heading-rotation + 正規化）後訓練任意軌跡模型。"""
+    device = next(model.parameters()).device
+    deltas = np.diff(X, axis=1)
+    R = LSTMPredictor._heading_rot(deltas)
+    d_body = deltas.copy()
+    d_body[..., :2] = np.einsum("bij,btj->bti", R, deltas[..., :2])
+    y_world = np.diff(np.concatenate([X[:, -1:, :], Y], axis=1), axis=1)
+    y_body = y_world.copy()
+    y_body[..., :2] = np.einsum("bij,bhj->bhi", R, y_world[..., :2])
+
+    Xt = torch.tensor(d_body / scale, dtype=torch.float32)
+    Yt = torch.tensor(y_body / scale, dtype=torch.float32)
+    n_val = max(1, int(len(Xt) * val_split))
+    perm = torch.randperm(len(Xt))
+    Xt, Yt = Xt[perm], Yt[perm]
+    Xv, Yv = Xt[:n_val].to(device), Yt[:n_val].to(device)
+    Xtr, Ytr = Xt[n_val:], Yt[n_val:]
+
+    opt   = torch.optim.Adam(model.parameters(), lr=lr)
+    sched = torch.optim.lr_scheduler.StepLR(opt, step_size=4, gamma=0.5)
+    loss_fn = nn.MSELoss()
+    for ep in range(epochs):
+        model.train()
+        idx = torch.randperm(len(Xtr))
+        tot = 0.0
+        for k in range(0, len(Xtr), batch):
+            b = idx[k:k + batch]
+            xb, yb = Xtr[b].to(device), Ytr[b].to(device)
+            opt.zero_grad()
+            loss = loss_fn(model(xb), yb)
+            loss.backward()
+            opt.step()
+            tot += loss.item() * len(b)
+        sched.step()
+        model.eval()
+        with torch.no_grad():
+            vloss = loss_fn(model(Xv), Yv).item()
+        if verbose:
+            print(f"  [{label}] epoch {ep+1:2d}/{epochs}"
+                  f"  train={tot/len(Xtr):.5f}  val={vloss:.5f}")
+
+
+def train_mlp_traj(X: np.ndarray, Y: np.ndarray, dt: float, max_speed: float,
+                   save_path: str, hidden: int = 256,
+                   epochs: int = 12, batch: int = 512, verbose: bool = True):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    hist_len = X.shape[1]
+    horizon  = Y.shape[1]
+    model = TrajMLP(hist_len, horizon, hidden).to(device)
+    _train_traj_model(model, X, Y, max_speed * dt, epochs=epochs,
+                      batch=batch, label="MLP", verbose=verbose)
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    torch.save({"state_dict": model.state_dict(), "horizon": horizon,
+                "hist_len": hist_len, "hidden": hidden}, save_path)
+    if verbose:
+        print(f"  [MLP] 模型已存檔 -> {save_path}")
+
+
+def train_transformer_traj(X: np.ndarray, Y: np.ndarray, dt: float,
+                           max_speed: float, save_path: str,
+                           d_model: int = 64, nhead: int = 4,
+                           num_layers: int = 2, epochs: int = 12,
+                           batch: int = 512, verbose: bool = True):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    horizon = Y.shape[1]
+    model = TrajTransformer(horizon, d_model, nhead, num_layers).to(device)
+    _train_traj_model(model, X, Y, max_speed * dt, epochs=epochs,
+                      batch=batch, label="Transformer", verbose=verbose)
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    torch.save({"state_dict": model.state_dict(), "horizon": horizon,
+                "d_model": d_model, "nhead": nhead,
+                "num_layers": num_layers}, save_path)
+    if verbose:
+        print(f"  [Transformer] 模型已存檔 -> {save_path}")
+
+
 # ================================================================ 訓練
 def make_training_windows(positions: np.ndarray, alive: np.ndarray,
                           hist_len: int, horizon: int, stride: int = 4,

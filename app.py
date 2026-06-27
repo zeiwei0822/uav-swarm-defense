@@ -55,6 +55,20 @@ FORMATIONS = [(k, f"〔{PARA_TAG[PARADIGM[k]]}〕{FORMATION_NAMES[k]}")
               for k in FORM_KEYS]
 # 防方＝傳統 / AI 兩種模式（整合了原本的「火力策略」與「識別器」）
 DEFENSE_MODES = [("trad", "傳統防空"), ("ai", "AI防空")]
+# 要點2 失效處理策略（領機/中繼失效後的應變，依《集群戰術應急》報告四策略）
+FAIL_MODES = [("chain", "繼承鏈"), ("health", "健康度"), ("bionic", "仿生")]
+FAIL_NAME = {"chain": "階級繼承鏈", "health": "健康度自主篩選", "bionic": "仿生湧現"}
+BRIEF_FAIL = {
+    "chain": "策略①階級繼承鏈：開戰前就排好『繼任清單』，領機亡→下一順位(中繼優先)"
+             "立即接管。反應快、開銷低；但繼任清單若被連續斬首耗盡→機群迷失癱瘓"
+             "（剛性策略的二次失效）。終端會進入 ToT 同時彈著＋混沌規避。",
+    "health": "策略②健康度自主篩選：領機亡→存活機依 S_node(電量0.4+網路中心性0.3+"
+              "算力0.2+感測0.1)分散式選舉最強者接任。抗毀傷；中繼失→向心收縮改 LOS"
+              "直控；大群指揮全失→集群分裂為2組各自續突。",
+    "bionic": "策略③仿生湧現：完全去中心化(Boids 對齊/聚合/斥力＋向心遷移)，"
+              "根本沒有固定領機——人人是領機、人人也不是。打掉任何一架都不影響群體"
+              "→免單點故障，AI 斬首在此徹底失效。",
+}
 
 # ---- 開戰前「作戰簡報」文案（依選項即時切換；陣型解說取自 formations.py）----
 FORM_NICK = {k: FORMATION_NAMES[k] for k in FORM_KEYS}
@@ -68,10 +82,10 @@ BRIEF_DEFENSE = {
             "經典點防禦：永遠先打離防線最近的敵機，反應快、命中高。但只用最"
             "陽春的規則認領機（最前面那架當領機），遇到把領機藏起來的隊形就"
             "認錯——殺得到外圍從機，卻打不到指揮核心，機群照樣協調突防。",
-    "ai": "指揮節點打擊　｜　行為識別（樹模型）　｜　LSTM 預測\n"
-          "全套 AI：用樹模型集成從 9 維行為特徵認出領機／中繼機，把有限飛彈"
-          "優先砸向指揮節點，再用 LSTM 預測攔截點。對『有指揮鏈』的無線大群，"
-          "這是唯一能斬首癱瘓整群的打法——但遇到光纖精準群就會踢到鐵板。",
+    "ai": "指揮節點打擊　｜　GNN 圖神經網路　｜　SIGINT 火控鎖定延遲　｜　LSTM\n"
+          "全套 AI：把機群當成圖、用 GNN 從網路結構認出領機（不靠手刻中心性，"
+          "領機 Top-1≈0.87）；但受火控鎖定延遲約束——目標進接戰圈才開始鎖定，領機"
+          "因 C2 流量最大→最先被鎖定才能斬首（鎖定前先攻最近的一般機），再用 LSTM 預測攔截。",
 }
 BRIEF_COMPARE_WIRELESS = (
     "無線大群有明確指揮鏈。把上方『防方』在傳統／AI 間切換、同陣同種子各跑一次，"
@@ -180,7 +194,9 @@ class App:
         self.var_relay = tk.IntVar(value=FORMATION_RELAYS["arrowhead"])
         self.var_decoy = tk.IntVar(value=0)          # 誘餌數（攻方反制AI識別，0=關）
         self.var_def = tk.StringVar(value="ai")      # 防方：trad / ai
-        self.var_seed = tk.IntVar(value=17)
+        self.var_fail = tk.StringVar(value="chain")  # 失效處理：chain/health/bionic
+        self.var_groups = tk.IntVar(value=1)         # 並進組數（情境一多組）
+        self.var_seed = tk.IntVar(value=23)  # 種子23：完整鏈(GNN斬首→繼承鏈遞補→再斬首)、0突防
 
         def combo(parent, label, var, options, width=10, on_change=None):
             ttk.Label(parent, text=label, style="Hdr.TLabel").pack(side="left",
@@ -203,6 +219,8 @@ class App:
               on_change=self._on_form_change)
         combo(bar, "防方", self.var_def, DEFENSE_MODES, 11,
               on_change=self._on_param_change)
+        combo(bar, "失效", self.var_fail, FAIL_MODES, 8,
+              on_change=self._on_param_change)
 
         ttk.Label(bar, text="機數", style="Hdr.TLabel").pack(side="left",
                                                             padx=(8, 3))
@@ -214,6 +232,12 @@ class App:
         tk.Spinbox(bar, from_=1, to=8, textvariable=self.var_relay, width=3,
                    bg="#0d1117", fg=FG, buttonbackground=PANEL,
                    insertbackground=FG, font=(CJK,15)).pack(side="left")
+        ttk.Label(bar, text="組數", style="Hdr.TLabel").pack(side="left",
+                                                            padx=(8, 3))
+        tk.Spinbox(bar, from_=1, to=4, textvariable=self.var_groups, width=3,
+                   bg="#0d1117", fg=FG, buttonbackground=PANEL,
+                   insertbackground=FG, font=(CJK, 15),
+                   command=self._on_param_change).pack(side="left")
         ttk.Label(bar, text="誘餌", style="Hdr.TLabel").pack(side="left",
                                                             padx=(8, 3))
         tk.Spinbox(bar, from_=0, to=4, textvariable=self.var_decoy, width=3,
@@ -364,6 +388,13 @@ class App:
             self._brief_card("③　這場在比什麼", "AI 能否斬首癱瘓", GREEN,
                              BRIEF_COMPARE_WIRELESS)
 
+        fs = self.var_fail.get()
+        ng = int(self.var_groups.get())
+        gtag = f"　·　{ng} 組並進" if ng > 1 else ""
+        self._brief_card("要點2　失效處理", FAIL_NAME.get(fs, fs) + gtag, "#d2a8ff",
+                         BRIEF_FAIL.get(fs, ""),
+                         stat="領機/中繼被打掉後怎麼辦")
+
         nd = int(self.var_decoy.get())
         if nd > 0:
             self._brief_card(
@@ -427,11 +458,10 @@ class App:
 
     def _defense_spec(self):
         """把『防方』模式展開成 (火力policy, 識別器code, 是否用LSTM)。
-        傳統＝打最近＋規則認領機＋卡爾曼；AI＝指揮節點打擊＋RF＋LSTM。"""
+        傳統＝打最近＋規則認領機＋卡爾曼；AI＝指揮節點打擊＋GNN＋LSTM＋SIGINT解碼延遲。"""
         if self.var_def.get() == "trad":
             return "nearest", "rule", False
-        # RF＝線上實測最佳（GBM 離線 Top-1 略高，但時序穩定度差→線上斬首反而失效）
-        return "ai", "rf", True
+        return "ai", "gnn", True       # GNN＝圖神經網路，離線/線上皆最佳的識別主力
 
     # ---- 分頁1：戰報
     def _build_tab_report(self, nb):
@@ -553,9 +583,12 @@ class App:
         cfg.swarm.n_drones = int(self.var_n.get())
         cfg.swarm.n_relays = int(self.var_relay.get())
         cfg.swarm.n_decoys = int(self.var_decoy.get())   # 誘餌（攻方反制AI識別）
+        cfg.swarm.fail_strategy = self.var_fail.get()    # 要點2 失效處理策略
+        cfg.swarm.n_groups = int(self.var_groups.get())  # 並進組數（情境一）
         cfg.swarm.n_axes = 3 if fc == "encircle" else 1  # 包圍：多方位向心
         # 攔截彈數隨威脅規模調整（小型光纖突擊面對的攔截彈較少，較貼近真實）
-        cfg.defense.n_missiles = max(6, int(round(cfg.swarm.n_drones * 0.7)))
+        # 0.8：接戰範圍拉大→交戰窗口變長，略增彈藥維持防守平衡（仍 < 機群數，無法全殲）
+        cfg.defense.n_missiles = max(6, int(round(cfg.swarm.n_drones * 0.8)))
         policy, ident_code, use_lstm = self._defense_spec()
         cfg.defense.policy = policy
         cfg.defense.mode = self.var_def.get()        # 供 tactical2d 切換旁白用
@@ -789,7 +822,8 @@ class App:
         ep = int(self.var_ep.get())
         if not messagebox.askyesno("訓練 AI",
                                    f"將以 {ep} 場隨機模擬重新生成資料並訓練 "
-                                   "LSTM / RF / MLP。\n視 GPU 約需數分鐘，"
+                                   "LSTM（軌跡）與 GNN（找領機）模型"
+                                   "（含 RF/MLP 對照）。\n視 GPU 約需數分鐘，"
                                    "確定開始？"):
             return
         self._run_proc([sys.executable, "-u", "train.py", "--episodes",
@@ -887,10 +921,10 @@ class App:
     # ============================================================ 雜項
     def _check_models(self):
         cfg = Config()
-        has_rf = os.path.exists(cfg.ai.rf_path)
+        has_gnn = os.path.exists(cfg.ai.gnn_path)
         has_lstm = os.path.exists(cfg.ai.lstm_path)
-        if has_rf and has_lstm:
-            self.ai_badge.configure(text="● AI 模型就緒 (RF+LSTM)",
+        if has_gnn and has_lstm:
+            self.ai_badge.configure(text="● AI 模型就緒 (GNN+LSTM)",
                                     foreground=GREEN)
         else:
             self.ai_badge.configure(

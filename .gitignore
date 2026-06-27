@@ -40,3 +40,10 @@ snaps/
 *.pptx
 deck_assets/
 _*.js
+
+# 投影片縮圖 / PPTX 解包暫存（體積大，可重新產生）
+slides_p*/
+uav_unpacked/
+
+# 個人對話匯出
+對話紀錄.html

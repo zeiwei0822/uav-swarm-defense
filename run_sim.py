@@ -27,13 +27,16 @@ def load_ai(cfg, prefer="auto", quiet=False):
     identifier, lstm = RuleIdentifier(), None
     if prefer == "rule":
         return identifier, lstm
-    if os.path.exists(cfg.ai.rf_path) and os.path.exists(cfg.ai.scaler_path) \
+    if os.path.exists(cfg.ai.gnn_path) and prefer in ("auto", "gnn"):
+        from ai.gnn import GNNIdentifier              # 圖神經網路：離線+線上皆最佳→主力
+        identifier = GNNIdentifier(cfg.ai.gnn_path)
+    elif os.path.exists(cfg.ai.rf_path) and os.path.exists(cfg.ai.scaler_path) \
             and prefer in ("auto", "rf"):
-        from ai.identify import RFIdentifier          # 線上實測最佳 → 預設主力
+        from ai.identify import RFIdentifier          # 樹模型 benchmark 對照
         identifier = RFIdentifier(cfg.ai.rf_path, cfg.ai.scaler_path)
     elif os.path.exists(cfg.ai.gbm_path) and os.path.exists(cfg.ai.scaler_path) \
             and prefer in ("auto", "gbm"):
-        from ai.identify import GBMIdentifier         # 離線 benchmark 最佳（對照）
+        from ai.identify import GBMIdentifier         # 離線 boosting 對照
         identifier = GBMIdentifier(cfg.ai.gbm_path, cfg.ai.scaler_path)
     if os.path.exists(cfg.ai.mlp_path) and os.path.exists(cfg.ai.scaler_path) \
             and prefer == "mlp":
@@ -59,8 +62,8 @@ def main():
     ap.add_argument("--relays", type=int, default=3, help="中繼機數量")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--identifier", default="auto",
-                    choices=["auto", "rule", "rf", "gbm", "mlp"],
-                    help="識別器選擇（auto=GBM 最佳）")
+                    choices=["auto", "rule", "rf", "gbm", "mlp", "gnn"],
+                    help="識別器選擇（auto=GNN 圖神經網路，主力）")
     ap.add_argument("--no-anim", action="store_true", help="不播動畫")
     ap.add_argument("--no-lstm", action="store_true",
                     help="不用 LSTM，改用卡爾曼基準（傳統防空）")

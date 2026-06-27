@@ -181,6 +181,36 @@ class RuleIdentifier:
         return scores
 
 
+class DegreeIdentifier:
+    """分支度中心性規則（依《IBCS 飽和防禦》報告）：
+    把同群無人機建成鄰近圖(距離<通訊半徑→連邊)，數每架的連線數(degree)；
+    連線最多＝領機（C2 流量/頻寬最大的等價替換）、次高＝中繼機。
+    對『領機藏中心』的隊形特別有效——中央節點連線數天然最高。"""
+    name = "分支度中心性"
+
+    def identify(self, pos_window: np.ndarray, feats: np.ndarray = None) -> np.ndarray:
+        if feats is None:
+            feats = extract_features(pos_window)
+        deg = feats[:, 3].astype(float)        # 度中心性(連線數，已正規化)
+        N = len(deg)
+        if N == 0:
+            return np.zeros((0, 3))
+
+        def softmax(z, tau=4.0):
+            e = np.exp((z - z.max()) * tau)
+            return e / e.sum()
+
+        p_lead = softmax(deg, 4.0)              # 分支度最高→突出為領機
+        # 中繼：分支度高但壓抑掉領機本身（次高的樞紐節點）
+        relay_raw = deg * (1.0 - p_lead / (p_lead.max() + 1e-9))
+        p_relay = relay_raw / (relay_raw.max() + 1e-9) * 0.8
+        scores = np.zeros((N, 3))
+        scores[:, ROLE_LEADER] = p_lead
+        scores[:, ROLE_RELAY] = np.clip(p_relay * (1 - p_lead), 0, 1)
+        scores[:, ROLE_FOLLOWER] = np.clip(1 - scores[:, 1] - scores[:, 2], 0, 1)
+        return scores
+
+
 # ================================================================ 2) Random Forest
 class RFIdentifier:
     name = "RandomForest"

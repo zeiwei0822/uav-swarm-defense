@@ -20,7 +20,9 @@ FORM_CODE = {f: i for i, f in enumerate(FORMATIONS)}
 
 def random_config(rng) -> Config:
     cfg = Config()
-    f = FORMATIONS[rng.integers(len(FORMATIONS))]
+    # 加重 snake + arrowhead 在訓練集中的比例（各佔 ~25%）
+    pool = list(FORMATIONS) + ["snake", "snake", "arrowhead", "arrowhead"]
+    f = pool[rng.integers(len(pool))]
     cfg.swarm.formation = f
     if is_fiber(f):                              # 光纖精準群：3~8 架小隊
         cfg.swarm.n_drones = int(rng.integers(4, 9))
@@ -31,6 +33,13 @@ def random_config(rng) -> Config:
         cfg.swarm.n_relays = int(rng.integers(2, 5))
         cfg.swarm.n_axes = (int(rng.integers(1, 4)) if f == "encircle"
                             else int(rng.integers(1, 3)))
+    # ★ 誘餌場景：arrowhead 有 40% 機率加入誘餌（訓練 GNN/SIGINT 反誘餌）
+    if f == "arrowhead" and rng.random() < 0.40:
+        cfg.swarm.n_decoys = int(rng.integers(2, 6))
+    else:
+        cfg.swarm.n_decoys = 0
+    # ★ 失效策略：chain / health 各半（bionic 已移除）
+    cfg.swarm.fail_strategy = ["chain", "health"][rng.integers(2)]
     cfg.swarm.cruise_speed = float(rng.uniform(15.0, 21.0))
     cfg.swarm.spacing = float(rng.uniform(32.0, 46.0))
     cfg.swarm.spawn_distance = float(rng.uniform(2600.0, 3400.0))
@@ -84,15 +93,40 @@ def harvest_identification(rec, cfg, rng, window=60, every_s=4.0,
             np.concatenate(grps), np.concatenate(forms))
 
 
+def harvest_graphs(rec, cfg, rng, window=60, every_s=4.0, t_warmup=8.0):
+    """每視窗抽一張圖供 GNN：(節點9維特徵, 鄰接矩陣, 角色標籤)。
+    與 harvest_identification 同視窗設定，故三方(規則/RF/GNN)可在同圖上比較。"""
+    from ai.gnn import build_adjacency
+    dt = cfg.sim.dt
+    sigma = cfg.defense.radar_sigma
+    T = len(rec.t)
+    step = int(every_s / dt)
+    k0 = max(window, int(t_warmup / dt))
+    graphs = []
+    for k in range(k0, T, step):
+        ok = rec.alive[k - window:k].all(axis=0)
+        ids = np.flatnonzero(ok)
+        if len(ids) < 4:
+            continue
+        win = rec.pos[k - window:k][:, ids] \
+            + rng.normal(0, sigma, (window, len(ids), 3))
+        feats = extract_features(win).astype(np.float32)
+        adj = build_adjacency(win).astype(np.float32)
+        labels = rec.roles[k - 1][ids].astype(np.int64)
+        graphs.append((feats, adj, labels))
+    return graphs
+
+
 def generate(n_episodes=40, out_dir="data", seed0=1000, test_frac=0.15,
              hist_len=20, horizon=25, max_traj_per_ep=1500, verbose=True):
     os.makedirs(out_dir, exist_ok=True)
     rng = np.random.default_rng(7)
+    graph_rng = np.random.default_rng(424242)   # 圖噪聲用獨立rng→不擾動traj/ident序列
     n_test = max(2, int(n_episodes * test_frac))
     buckets = {"train": {"tx": [], "ty": [], "ix": [], "iy": [], "ig": [],
-                         "if": []},
+                         "if": [], "graphs": []},
                "test": {"tx": [], "ty": [], "ix": [], "iy": [], "ig": [],
-                        "if": []}}
+                        "if": [], "graphs": []}}
 
     for ep in range(n_episodes):
         which = "test" if ep >= n_episodes - n_test else "train"
@@ -112,6 +146,8 @@ def generate(n_episodes=40, out_dir="data", seed0=1000, test_frac=0.15,
             buckets[which]["iy"].append(h[1])
             buckets[which]["ig"].append(h[2])
             buckets[which]["if"].append(h[3])
+        # --- GNN 圖資料（每視窗一張圖；獨立rng不擾動上面的序列）
+        buckets[which]["graphs"].extend(harvest_graphs(rec, cfg, graph_rng))
         if verbose:
             print(f"  episode {ep+1:3d}/{n_episodes} [{which:5s}] "
                   f"{cfg.swarm.formation:6s} n={cfg.swarm.n_drones:2d} "
@@ -126,7 +162,14 @@ def generate(n_episodes=40, out_dir="data", seed0=1000, test_frac=0.15,
             os.path.join(out_dir, f"ident_{which}.npz"),
             X=np.concatenate(b["ix"]), y=np.concatenate(b["iy"]),
             grp=np.concatenate(b["ig"]), form=np.concatenate(b["if"]))
+        # GNN 圖資料（ragged → object array）
+        g = b["graphs"]
+        garr = np.empty(len(g), dtype=object)
+        for i, gr in enumerate(g):
+            garr[i] = gr
+        np.savez(os.path.join(out_dir, f"graphs_{which}.npz"), graphs=garr)
         if verbose:
             nt = sum(len(x) for x in b["tx"])
             ni = sum(len(x) for x in b["ix"])
-            print(f"[datagen] {which}: 軌跡視窗 {nt}、識別樣本 {ni} -> {out_dir}/")
+            print(f"[datagen] {which}: 軌跡視窗 {nt}、識別樣本 {ni}、"
+                  f"圖 {len(g)} -> {out_dir}/")

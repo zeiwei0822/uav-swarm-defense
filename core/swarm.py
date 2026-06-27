@@ -143,6 +143,15 @@ class Swarm:
         # 初始指派 = 各機就位於自己的槽
         self.assignment = {i: i for i in range(n)}
 
+        # ★ 反輻射(SEAD)機：標記最前方(尖端,槽位最 +x)的 n_sead 架從機，衝防空壓制
+        #   火力撕破口、可拋棄；領機/中繼不當 SEAD。
+        ns = int(getattr(cfg, "n_sead", 0))
+        if ns > 0:
+            foll = sorted((d for d in self.drones if d.role == ROLE_FOLLOWER),
+                          key=lambda d: -float(self.slots[d.id][0]))
+            for d in foll[:ns]:
+                d.is_sead = True
+
         # ★ 光纖群：每架都經實體光纖持有完整航線 → 全員任務備援，
         #   領機被打掉可「即時無縫接替」，後機照航跡續突（抗斬首的關鍵）。
         if self.fiber:
@@ -173,6 +182,25 @@ class Swarm:
         self.leader_death_t = None     # 領機陣亡時刻（真實）
         self.election_done_t = None    # 選舉完成時刻（偵測+延遲後）
         self.pending_confirm = []      # [(確認時刻, 陣亡機id)] 非領機損失確認佇列
+
+        # ★★ 要點2 失效處理策略 + S_node 健康度（種子化→可重現）
+        self.fail_strategy = getattr(cfg, "fail_strategy", "chain")
+        for d in self.drones:                       # 各機個體健康度差異
+            d.soc = float(rng.uniform(0.72, 1.0))
+            d.computing = float(rng.uniform(0.55, 1.0))
+            d.sensor = float(rng.uniform(0.55, 1.0))
+        self.contracted = False        # 向心收縮(中繼全失→LOS直控)旗標
+        self.bionic = (self.fail_strategy == "bionic")  # 仿生湧現：無固定領機
+        self.terminal = False          # 終端自殺階段(ToT同時彈著+混沌規避)
+        # 多組並進(情境一)：每組各有獨立指揮域；group_leader[gid]=該組領機 id
+        self.n_groups = max(1, int(getattr(cfg, "n_groups", 1)))
+        self.group_leader = {0: 0}
+        self.wp_i_of = {0: 0}
+        self._fissioned = False
+        if self.bionic:
+            self.coord_C = 0.8         # 仿生：無領機，但個體規則維持中等協調
+        if self.n_groups > 1:
+            self._init_groups()
 
     @staticmethod
     def _slot_owner_init(slot_idx, n):
@@ -222,6 +250,26 @@ class Swarm:
         alive = self.alive_drones()
         connected = {d.id: False for d in self.drones}
         self.comm_edges = []
+        if self.bionic:                       # 仿生：對等網狀，個體只看鄰居
+            for d in alive:
+                d.connected = connected[d.id] = True
+                d.last_heard = t
+            return connected
+        if self._is_multi():                  # 多組/分裂：各機連到本組領機
+            cr = self.cfg.comm_range * self.comm_mult
+            for d in alive:
+                gl = self.get_group_leader(d.group_id)
+                if gl is not None and (d.id == gl.id
+                                       or np.linalg.norm(d.pos - gl.pos) <= cr):
+                    d.connected = connected[d.id] = True
+                    d.last_heard = t
+                    d.last_leader_pos = gl.pos.copy()
+                    d.last_leader_vel = gl.vel.copy()
+                    if d.id != gl.id:
+                        self.comm_edges.append((gl.id, d.id))
+                else:
+                    d.connected = False
+            return connected
         if leader is None:
             for d in alive:
                 d.connected = False
@@ -296,6 +344,11 @@ class Swarm:
     # ------------------------------------------------------------ 失效處理
     def _handle_failures(self, t: float):
         cfg = self.cfg
+        if self.bionic:
+            return                       # 策略三 仿生：無領機，無失效處理
+        if self._is_multi():
+            self._handle_failures_multi(t)
+            return
         # --- A. 領機失效：心跳逾時 → 選舉
         leader = self.get_leader()
         if leader is None and not self.lost_mode:
@@ -322,44 +375,96 @@ class Swarm:
         due = [x for x in self.pending_confirm if x[0] <= t]
         if due:
             self.pending_confirm = [x for x in self.pending_confirm if x[0] > t]
+            relay_lost = False
             for _, dead_id in due:
-                dead_role = self.drones[dead_id].role
-                if dead_role == ROLE_RELAY:
+                if self.drones[dead_id].role == ROLE_RELAY:
                     self._promote_relay(t, near_id=dead_id)
-            if self.get_leader() is not None:
+                    relay_lost = True
+            leader = self.get_leader()
+            # 情境二·3：健康度策略下中繼失→向心收縮，全隊縮短間距改領機 LOS 直控
+            if (self.fail_strategy == "health" and relay_lost
+                    and leader is not None and not self.contracted
+                    and not self.fiber):
+                self.contracted = True
+                self.events.append(
+                    (t, "🪢 中繼失效 → 向心收縮，全隊縮短間距改 LOS 直控"))
+            if leader is not None:
                 self._regen_formation(t, reason="編隊重組")
 
-    def _elect_leader(self, t: float):
-        """選舉：持有任務資料者優先（中繼機 → 其他），否則機群迷失"""
-        cand = [d for d in self.alive_drones() if d.has_mission]
-        cand.sort(key=lambda d: (0 if d.role == ROLE_RELAY else 1, d.id))
-        if not cand:
-            self.lost_mode = True
-            alive = self.alive_drones()
-            self.lost_center = (np.mean([d.pos for d in alive], axis=0)
-                                if alive else self.target * 0)
-            # 距目標尚遠時被癱瘓才算「斬首成功」（終端突防耗盡節點不算）
-            self.lost_at_dist = float(
-                np.linalg.norm(self.lost_center - self.target))
-            self.events.append((t, "❌ 無任務備援節點存活 — 機群迷失，任務癱瘓"
-                                   f"（距目標 {self.lost_at_dist:.0f} m）"))
+    def _centrality_map(self):
+        """各存活機的拓撲中心度近似(0~1)：越靠機群質心越高(代理 betweenness)。"""
+        alive = self.alive_drones()
+        if not alive:
+            return {}
+        P = np.array([d.pos for d in alive])
+        c = P.mean(axis=0)
+        dist = np.linalg.norm(P - c, axis=1)
+        mx = float(dist.max()) + 1e-6
+        return {alive[i].id: float(1.0 - dist[i] / mx) for i in range(len(alive))}
+
+    def _snode_score(self, d, cen_map):
+        """S_node 健康度 = 電量0.4 + 中心性0.3 + 算力0.2 + 感測0.1（要點2策略二）。"""
+        w = self.cfg.snode_w
+        cen = cen_map.get(d.id, 0.5)
+        return w[0] * d.soc + w[1] * cen + w[2] * d.computing + w[3] * d.sensor
+
+    def _on_total_command_loss(self, t: float):
+        """無可接任指揮節點：機群迷失癱瘓。繼承鏈策略下＝斬首成功，
+        凸顯剛性繼任清單耗盡後的『二次失效』。"""
+        alive = self.alive_drones()
+        self.lost_mode = True
+        self.lost_center = (np.mean([d.pos for d in alive], axis=0)
+                            if alive else self.target * 0)
+        self.lost_at_dist = float(np.linalg.norm(self.lost_center - self.target))
+        self.events.append((t, "❌ 無備援指揮節點存活 — 機群迷失，任務癱瘓"
+                               f"（距目標 {self.lost_at_dist:.0f} m）"))
+
+    def _elect_leader(self, t: float, gid: int = 0):
+        """選舉新領機。chain=繼任清單(僅持任務者,中繼優先,順位)；
+        health=S_node 健康度(任一存活機可接任)。指揮節點全失：chain→癱瘓(二次失效)、
+        health 大群→集群分裂、health 小群→最健康者接任。bionic 無固定領機→不選舉。"""
+        if self.bionic:
             return
-        new = cand[0]
+        members = [d for d in self.alive_drones() if d.group_id == gid]
+        mission_cand = [d for d in members if d.has_mission]
+        if self.fail_strategy == "health":
+            # 健康度策略：指揮節點全失 + 大群 → 集群分裂(情境二·1)
+            if (not mission_cand and not self._fissioned and not self.fiber
+                    and len(members) >= self.cfg.fission_min):
+                self._fission(t)
+                return
+            cand = members                  # 任一存活機可依健康度接任(抗毀傷)
+        else:
+            cand = mission_cand             # 繼承鏈：僅繼任清單(持任務者)
+        if not cand:
+            self._on_total_command_loss(t)  # 清單耗盡/全滅 → 迷失癱瘓
+            return
+        if self.fail_strategy == "health":
+            cen = self._centrality_map()
+            new = max(cand, key=lambda d: self._snode_score(d, cen))
+            note = f"健康度選舉 S_node={self._snode_score(new, cen):.2f}"
+        else:
+            cand.sort(key=lambda d: (0 if d.role == ROLE_RELAY else 1, d.id))
+            new = cand[0]
+            note = "繼任清單順位"
         old_role = new.role
         new.role = ROLE_LEADER
+        new.has_mission = True
         self.leader_id = new.id
+        self.group_leader[gid] = new.id
         if self.fiber:
-            # 光纖：航線早經實體鏈路共享 → 無縫接替，協調不需重建
             self.coord_ready_t = t
             self.events.append(
                 (t, f"🔗 光纖無縫接替：#{new.id} 即時續飛航線（後機照常突防）"))
         else:
-            self.coord_ready_t = t + self.cfg.coord_rebuild_time  # 協調須重建
+            self.coord_ready_t = t + self.cfg.coord_rebuild_time
             self.events.append(
-                (t, f"👑 {ROLE_NAMES[old_role]} #{new.id} 遞補為新領機"
-                    f"（協調重建中…）"))
-        # 領機從原中繼機升任 → 中繼機數量不足 → 提拔從機
-        self._promote_relay(t, near_id=new.id)
+                (t, f"👑 {ROLE_NAMES[old_role]} #{new.id} 遞補為新領機（{note}）"))
+        # ★ 斬首→癱瘓的關鍵：繼承鏈(僵化)不補充中繼——原始指揮鏈(領機+原中繼)被逐一
+        #   斬殺耗盡後即『二次失效』迷失癱瘓，正是剛性繼任清單的代價。健康度/光纖則動態
+        #   補位(從機升中繼)維持韌性、抗斬首。這讓無線繼承鏈群真的「斬得死」。
+        if self.fail_strategy == "health" or self.fiber:
+            self._promote_relay(t, near_id=new.id)
         self._regen_formation(t, reason="新領機重整編隊")
 
     def _promote_relay(self, t: float, near_id: int = None):
@@ -393,6 +498,8 @@ class Swarm:
         if leader is None or n == 0:
             return
         self.slots = make_formation(self.formation, n, self.cfg.spacing)
+        if self.contracted:                  # 向心收縮：縮短間距改 LOS 直控
+            self.slots = self.slots * self.cfg.contract_factor
         self.relay_slot_idx = pick_relay_slots(
             self.slots, min(self.cfg.n_relays, n - 1), self.rng)
         slot_world = slot_world_positions(leader.pos, self.form_heading,
@@ -422,13 +529,18 @@ class Swarm:
             self.events.append((t, f"🛠️ {reason}（存活 {n} 架）"))
 
     # ------------------------------------------------------------ 控制律
-    def _leader_control(self, d: Drone, t, missiles):
+    def _leader_control(self, d: Drone, t, missiles, gid=None):
         cfg = self.cfg
-        wp = self.waypoints[self.wp_i]
+        wi = self.wp_i if gid is None else self.wp_i_of.get(gid, 0)
+        wp = self.waypoints[wi]
         to_wp = wp - d.pos
-        if np.linalg.norm(to_wp) < 60.0 and self.wp_i < len(self.waypoints) - 1:
-            self.wp_i += 1
-            wp = self.waypoints[self.wp_i]
+        if np.linalg.norm(to_wp) < 60.0 and wi < len(self.waypoints) - 1:
+            wi += 1
+            if gid is None:
+                self.wp_i = wi
+            else:
+                self.wp_i_of[gid] = wi
+            wp = self.waypoints[wi]
             to_wp = wp - d.pos
         v_des = to_wp / (np.linalg.norm(to_wp) + 1e-9) * cfg.cruise_speed
         a = (v_des - d.vel) * 1.2
@@ -506,20 +618,156 @@ class Swarm:
         return leader
 
     def _decoy_control(self, d: Drone, t, missiles):
-        """誘餌：衝到機群質心前方當『假領機點』，誘 AI 把識別/火力導過來，
-        掩護真領機。正面性是防方識別第一大特徵，故衝最前方最能騙過 AI。"""
+        """誘餌：全速衝向目標充當肉盾——不閃避，讓傳統防空把彈藥耗在誘餌上，
+        掩護真群突防。用 max_speed 超越主群、形成視覺上清晰的前導犧牲層。"""
         cfg = self.cfg
-        alive = self.alive_drones()
-        cen = (np.mean([dd.pos for dd in alive], axis=0)
-               if alive else d.pos.copy())
-        to_t = self.target - cen
+        v_des = self.target - d.pos
+        v_des = v_des / (np.linalg.norm(v_des) + 1e-9) * cfg.max_speed
+        a = (v_des - d.vel) * 1.5
+        return a  # 不閃避，讓攔截彈鎖定
+
+    def _sead_control(self, d: Drone, t, missiles):
+        """反輻射(SEAD)機：全速直撲防空（目標），進近距即壓制其火力、撕開雷達破口。
+        衝在主力前方、可拋棄；正面承受攔截為後方開路（故規避減半、更敢衝）。"""
+        to_t = self.target - d.pos
         u = to_t / (np.linalg.norm(to_t) + 1e-9)
-        false_pos = cen + u * cfg.decoy_lead
-        false_pos[2] = cfg.spawn_alt
-        v_des = false_pos - d.pos
-        v_des = v_des / (np.linalg.norm(v_des) + 1e-9) * cfg.cruise_speed
-        a = (v_des - d.vel) * 1.1
+        v_des = u * self.cfg.max_speed              # 全速直取防空、不繞
+        a = (v_des - d.vel) * 1.5
+        return a + self._evade_accel(d, t, missiles) * 0.5
+
+    # ------------------------------- 失效應變：仿生 / 多組 / 集群分裂 / 終端（要點2）
+    def _is_multi(self):
+        return self.n_groups > 1 or self._fissioned
+
+    def _boids_control(self, d, t, missiles):
+        """策略三 仿生湧現(Boids)：無領機，靠斥力/對齊/聚合＋向心遷移湧現群體行為。
+        人人是領機、人人也不是→打掉任何一架都不影響群體（AI 斬首在此失效）。"""
+        cfg = self.cfg
+        nbrs = [o for o in self.alive_drones()
+                if o.id != d.id and np.linalg.norm(o.pos - d.pos) < cfg.comm_range]
+        nbrs.sort(key=lambda o: np.linalg.norm(o.pos - d.pos))
+        nbrs = nbrs[:6]                                   # 只看最近 6 個鄰居
+        v_des = np.zeros(3)
+        if nbrs:
+            cen = np.mean([o.pos for o in nbrs], axis=0)
+            v_align = np.mean([o.vel for o in nbrs], axis=0)
+            v_des += 0.6 * (cen - d.pos)                  # 聚合 Cohesion
+            v_des += 0.5 * (v_align - d.vel)              # 對齊 Alignment（斥力另由分離力處理）
+        to_t = self.target - d.pos                        # 向心遷移：共同目標
+        v_des += to_t / (np.linalg.norm(to_t) + 1e-9) * cfg.cruise_speed
+        nn = np.linalg.norm(v_des)
+        if nn > cfg.cruise_speed:
+            v_des = v_des / nn * cfg.cruise_speed
+        return (v_des - d.vel) * 1.0 + self._evade_accel(d, t, missiles)
+
+    def _update_terminal(self, t):
+        """策略四 終端自殺：機群質心進目標近域→ToT 同時彈著＋末端混沌規避。"""
+        if self.terminal:
+            return
+        alive = self.alive_drones()
+        if alive and np.linalg.norm(np.mean([d.pos for d in alive], axis=0)
+                                    - self.target) < self.cfg.terminal_dist:
+            self.terminal = True
+            self.events.append((t, "🔻 進入終端自殺階段：同時彈著(ToT)＋末端混沌規避"))
+
+    def get_group_leader(self, gid):
+        lid = self.group_leader.get(gid)
+        if lid is not None and self.drones[lid].alive \
+                and self.drones[lid].role == ROLE_LEADER:
+            return self.drones[lid]
+        return None
+
+    def _multi_control(self, d, t, missiles):
+        """多組並進／集群分裂：各機跟隨『本組領機』，組領機各自導航突擊。"""
+        cfg = self.cfg
+        gl = self.get_group_leader(d.group_id)
+        if gl is None:
+            return self._boids_control(d, t, missiles)     # 本組無領機→退化仿生
+        if d.id == gl.id:
+            return self._leader_control(d, t, missiles, gid=d.group_id)
+        h = gl.heading_xy()
+        back = np.array([-h[0], -h[1], 0.0]) * cfg.spacing * 1.1
+        side = np.array([-h[1], h[0], 0.0]) * ((d.id % 5 - 2) * cfg.spacing * 0.6)
+        target = gl.pos + back + side
+        a = cfg.kp * (target - d.pos) + cfg.kd * (gl.vel - d.vel)
         return a + self._evade_accel(d, t, missiles)
+
+    def _make_group(self, t, gid, members, reason):
+        """把 members 設為獨立一組：健康度選領機、提拔一中繼、繼承當前航點進度。"""
+        if not members:
+            return
+        cen = self._centrality_map()
+        for d in members:
+            d.group_id = gid
+            d.role = ROLE_FOLLOWER
+            d.has_mission = False
+        lead = max(members, key=lambda d: self._snode_score(d, cen))
+        lead.role = ROLE_LEADER
+        lead.has_mission = True
+        self.group_leader[gid] = lead.id
+        self.wp_i_of[gid] = getattr(self, "wp_i", 0)
+        rest = [d for d in members if d.id != lead.id]
+        if rest:                                           # 提拔最健康從機為組內中繼
+            r = max(rest, key=lambda d: self._snode_score(d, cen))
+            r.role = ROLE_RELAY
+            r.has_mission = True
+
+    def _fission(self, t):
+        """情境二·1：大群核心雙失→集群分裂為 2 組，各自健康度選領機、互為犄角續突。"""
+        alive = self.alive_drones()
+        P = np.array([d.pos[:2] for d in alive])
+        c0 = P[int(np.argmax(np.linalg.norm(P - P.mean(0), axis=1)))]
+        c1 = P[int(np.argmax(np.linalg.norm(P - c0, axis=1)))]
+        centers = np.array([c0, c1], float)
+        lab = np.zeros(len(P), int)
+        for _ in range(8):
+            lab = np.argmin(np.linalg.norm(P[:, None, :] - centers[None, :, :],
+                                           axis=2), axis=1)
+            for j in range(2):
+                if (lab == j).any():
+                    centers[j] = P[lab == j].mean(0)
+        self.group_leader, self.wp_i_of = {}, {}
+        for gid in (0, 1):
+            self._make_group(t, gid, [alive[i] for i in range(len(alive))
+                                      if lab[i] == gid], "分裂")
+        self._fissioned = True
+        self.leader_id = self.group_leader.get(0, self.leader_id)
+        self.events.append(
+            (t, f"✂️ 集群分裂：{len(alive)} 架裂為 2 組，各組健康度選領機、互為犄角續突"))
+
+    def _init_groups(self):
+        """情境一：開場即分 n_groups 個獨立指揮域（依出發橫向位置分帶）。"""
+        alive = self.alive_drones()
+        order = np.argsort([d.pos[1] for d in alive])
+        self.group_leader, self.wp_i_of = {}, {}
+        for gid, idx in enumerate(np.array_split(order, self.n_groups)):
+            self._make_group(0.0, gid, [alive[i] for i in idx], "多組")
+        self.leader_id = self.group_leader.get(0, 0)
+
+    def _handle_failures_multi(self, t):
+        """多組失效處理：各組領機亡→健康度重選；組過小/指揮全失→併入最近組(跨組自癒)。"""
+        for gid in sorted(self.group_leader.keys()):
+            members = [d for d in self.alive_drones() if d.group_id == gid]
+            if not members:
+                self.group_leader.pop(gid, None)
+                self.wp_i_of.pop(gid, None)
+                continue
+            if self.get_group_leader(gid) is None:
+                if len(members) <= 2 and len(self.group_leader) > 1:
+                    others = [g for g in self.group_leader if g != gid]
+                    mc = np.mean([d.pos for d in members], axis=0)
+                    best = min(others, key=lambda g: np.linalg.norm(
+                        self.drones[self.group_leader[g]].pos - mc))
+                    for d in members:
+                        d.group_id = best
+                    self.group_leader.pop(gid, None)
+                    self.wp_i_of.pop(gid, None)
+                    self.events.append(
+                        (t, f"🌐 第{gid}組指揮全失→孤兒併入第{best}組（跨組 mesh 自癒）"))
+                else:
+                    self._make_group(t, gid, members, "重選")
+                    self.events.append(
+                        (t, f"👑 第{gid}組領機失效→健康度重選新領機"))
 
     def _converge_frac(self, leader):
         """多軸夾擊收攏係數：1 = 出發(各股最分散) → 0 = 抵達目標(向心收攏)。"""
@@ -572,7 +820,11 @@ class Swarm:
         h = d.heading_xy()
         lateral = np.array([-h[1], h[0], 0.0])
         s = np.sin(2 * np.pi * t / cfg.evade_period + d.evade_phase)
-        return lateral * cfg.evade_accel * eff * np.sign(s) \
+        swing = np.sign(s)
+        if self.terminal:        # 策略四 末端混沌：高頻不規則擺動→防空前置量算不準
+            swing = float(np.clip(swing + 0.7 * np.sin(7.3 * t + 3.1 * d.evade_phase)
+                                  * np.cos(3.7 * t + d.id), -1.4, 1.4))
+        return lateral * cfg.evade_accel * eff * swing \
             + np.array([0, 0, 1.0]) * cfg.evade_accel * eff * 0.35 * np.cos(
                 2 * np.pi * t / cfg.evade_period + d.evade_phase)
 
@@ -585,7 +837,11 @@ class Swarm:
             self.coord_C = 0.0
             return
         conn = float(np.mean([d.connected for d in alive]))
-        if self.fiber:
+        if self.bionic:
+            target = max(conn, 0.75)           # 仿生：去中心化，協調不依賴任何單機
+        elif self._is_multi():
+            target = max(conn, 0.6)            # 多組：各組獨立，整體協調不全崩
+        elif self.fiber:
             target = max(conn, 0.7)            # 光纖：協調靠預規劃航線，不依賴領機
         elif leader is None:
             target = 0.15                      # 無領機 → 協調崩潰
@@ -606,7 +862,8 @@ class Swarm:
         self._handle_failures(t)
         self._update_coordination(t)
         leader = self.get_leader()
-        self._leader_ok = leader is not None    # 供 _evade_accel 判斷預警
+        # 預警大腦：有領機、或仿生/多組(對等網狀/各組獨立)皆維持全網預警
+        self._leader_ok = (leader is not None) or self.bionic or self._is_multi()
         self._cf = self._converge_frac(leader)  # 多軸向心收攏係數（1→0）
         if leader is not None:                  # 一字蛇形：緩存領機航跡供後機沿跡尾隨
             self.leader_trail.append(leader.pos.copy())
@@ -615,22 +872,34 @@ class Swarm:
         anchor = self._anchor_drone(leader)     # 空間領頭(領機或誘餌)
         self._anchor_live = anchor.id if anchor is not None else self.leader_id
         sep = self._separation_accel()
+        self._multi = (self.n_groups > 1) or self._fissioned   # 多組/分裂模式
+        self._update_terminal(t)                # 終端自殺階段偵測(ToT+混沌)
 
         for d in self.alive_drones():
-            if self.lost_mode:
+            # ★ S_node 電量隨飛行遞減；指揮節點(領機/中繼)負載重→耗更快(健康度會更替)
+            d.soc = max(0.0, d.soc - cfg.soc_decay *
+                        (2.5 if d.role != ROLE_FOLLOWER else 1.0))
+            if self.bionic:
+                a = self._boids_control(d, t, missiles)        # 策略三：仿生湧現
+            elif self.lost_mode:
                 a = self._lost_control(d, t, missiles)
+            elif self._multi:
+                a = self._multi_control(d, t, missiles)        # 多組/集群分裂
             elif d.id == self._anchor_live:
-                a = self._leader_control(d, t, missiles)   # 空間領頭導航
+                a = self._leader_control(d, t, missiles)       # 空間領頭導航
+            elif d.is_sead and not self.lost_mode:
+                a = self._sead_control(d, t, missiles)         # 反輻射機：衝防空壓制
             elif d.is_decoy:
-                a = self._decoy_control(d, t, missiles)     # 其餘誘餌：前方佯動
+                a = self._decoy_control(d, t, missiles)        # 其餘誘餌：前方佯動
             else:
                 a = self._follower_control(d, t, missiles,
                                            leader is not None)  # 含沉默真領機
             a = a + sep[d.id]
             d.step(a, self.dt, cfg.max_accel, cfg.max_speed)
 
-            # 突防判定
+            # 突防判定（誘餌不攜戰鬥部，不計突防）
             if not self.lost_mode and \
+                    not getattr(d, "is_decoy", False) and \
                     np.linalg.norm(d.pos - self.target) < cfg.strike_radius:
                 d.alive = False
                 d.succeeded = True
